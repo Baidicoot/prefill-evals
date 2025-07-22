@@ -7,8 +7,20 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Dict, Any, Optional, List
 import re
+import sys
+import os
+
+# Add safety-tooling to path if it's a sibling directory
+safety_tooling_path = Path(__file__).parent.parent / "safety-tooling"
+if safety_tooling_path.exists():
+    sys.path.insert(0, str(safety_tooling_path))
 
 from prefill_evals.models import ScenarioEval
+
+# Import safety-tooling components  
+from safetytooling.apis.inference.api import InferenceAPI
+from safetytooling.data_models import ChatMessage, MessageRole, Prompt
+from safetytooling.utils import utils
 
 
 class ScenarioFeedbackProvider(ABC):
@@ -31,7 +43,7 @@ class ScenarioFeedbackProvider(ABC):
 class ModelBasedScenarioFeedback(ScenarioFeedbackProvider):
     """Provide feedback on scenarios using a language model."""
     
-    def __init__(self, name: str, model_config: Dict[str, str], template_file: Path):
+    def __init__(self, name: str, model_config: Dict[str, str], template_file: Path, inference_api: Optional[InferenceAPI] = None):
         """
         Initialize the feedback provider.
         
@@ -39,6 +51,7 @@ class ModelBasedScenarioFeedback(ScenarioFeedbackProvider):
             name: Name of this feedback provider
             model_config: Dict with 'provider' and 'model_id'
             template_file: Path to feedback prompt template
+            inference_api: Optional InferenceAPI instance (creates one if not provided)
         """
         self.name = name
         self.model_config = model_config
@@ -46,6 +59,14 @@ class ModelBasedScenarioFeedback(ScenarioFeedbackProvider):
         
         if not self.template_file.exists():
             raise FileNotFoundError(f"Feedback template file not found: {self.template_file}")
+        
+        # Setup InferenceAPI if not provided
+        if inference_api is None:
+            utils.setup_environment()
+            cache_dir = Path(os.environ.get("CACHE_DIR", ".cache"))
+            self.inference_api = InferenceAPI(cache_dir=cache_dir)
+        else:
+            self.inference_api = inference_api
         
         # Load template at initialization
         with open(self.template_file, 'r') as f:
@@ -132,32 +153,22 @@ class ModelBasedScenarioFeedback(ScenarioFeedbackProvider):
     
     async def _call_model(self, prompt: str) -> str:
         """
-        Call the model to get feedback.
-        
-        This is a placeholder - in practice, this would use the appropriate API
-        based on self.model_config['provider'].
+        Call the model to get feedback using InferenceAPI.
         """
-        # Import the appropriate client based on provider
-        if self.model_config['provider'] == 'anthropic':
-            from anthropic import Anthropic
-            client = Anthropic()
-            response = client.messages.create(
-                model=self.model_config['model_id'],
-                messages=[{"role": "user", "content": prompt}],
-                max_tokens=2048
-            )
-            return response.content[0].text
-        elif self.model_config['provider'] == 'openai':
-            from openai import OpenAI
-            client = OpenAI()
-            response = client.chat.completions.create(
-                model=self.model_config['model_id'],
-                messages=[{"role": "user", "content": prompt}],
-                max_tokens=2048
-            )
-            return response.choices[0].message.content
-        else:
-            raise ValueError(f"Unsupported provider: {self.model_config['provider']}")
+        # Create prompt with single user message
+        inference_prompt = Prompt(messages=[
+            ChatMessage(content=prompt, role=MessageRole.user)
+        ])
+        
+        # Call the model
+        responses = await self.inference_api(
+            model_id=self.model_config['model_id'],
+            prompt=inference_prompt,
+            max_tokens=2048,
+            force_provider=self.model_config['provider'] if self.model_config['provider'] in ['anthropic', 'openai'] else None,
+        )
+        
+        return responses[0].completion
     
     def _extract_feedback(self, response: str) -> Dict[str, Any]:
         """

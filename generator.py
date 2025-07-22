@@ -7,11 +7,23 @@ import asyncio
 from pathlib import Path
 from typing import Dict, List, Optional, Any, Tuple
 import json
+import os
+import sys
+
+# Add safety-tooling to path if it's a sibling directory
+safety_tooling_path = Path(__file__).parent.parent / "safety-tooling"
+if safety_tooling_path.exists():
+    sys.path.insert(0, str(safety_tooling_path))
 
 from prefill_evals.config import GenerationConfig, ScenarioFeedbackConfig
 from prefill_evals.parser import parse_generated_output, parse_and_validate_items
 from prefill_evals.models import ScenarioEval, validate_scenario
 from prefill_evals.feedback import ModelBasedScenarioFeedback, format_feedback_for_revision
+
+# Import safety-tooling components
+from safetytooling.apis.inference.api import InferenceAPI
+from safetytooling.data_models import ChatMessage, MessageRole, Prompt
+from safetytooling.utils import utils
 
 
 class ScenarioGenerator:
@@ -26,6 +38,15 @@ class ScenarioGenerator:
         """
         self.config = config
         self.conversation_history = []
+        
+        # Setup environment and initialize InferenceAPI
+        utils.setup_environment()
+        cache_dir = Path(os.environ.get("CACHE_DIR", ".cache"))
+        self.inference_api = InferenceAPI(
+            cache_dir=cache_dir,
+            anthropic_num_threads=80,
+            openai_num_threads=100,
+        )
         
         # Load prompt templates
         self.prompts = self._load_prompts()
@@ -75,7 +96,8 @@ class ScenarioGenerator:
                     'provider': fb_config.model.provider,
                     'model_id': fb_config.model.model_id
                 },
-                template_file=fb_config.template_file
+                template_file=fb_config.template_file,
+                inference_api=self.inference_api
             )
             providers.append(provider)
         return providers
@@ -237,40 +259,28 @@ class ScenarioGenerator:
         provider = self.config.generator_model.provider
         model_id = self.config.generator_model.model_id
         
-        if provider == 'anthropic':
-            from anthropic import Anthropic
-            client = Anthropic()
-            
-            # Extract system message if present
-            system = None
-            messages = []
-            for msg in self.conversation_history:
-                if msg['role'] == 'system':
-                    system = msg['content']
-                else:
-                    messages.append(msg)
-            
-            response = client.messages.create(
-                model=model_id,
-                system=system,
-                messages=messages,
-                max_tokens=8192
-            )
-            return response.content[0].text
-            
-        elif provider == 'openai':
-            from openai import OpenAI
-            client = OpenAI()
-            
-            response = client.chat.completions.create(
-                model=model_id,
-                messages=self.conversation_history,
-                max_tokens=8192
-            )
-            return response.choices[0].message.content
-            
-        else:
-            raise ValueError(f"Unsupported provider: {provider}")
+        # Convert conversation history to ChatMessage format
+        messages = []
+        for msg in self.conversation_history:
+            role = MessageRole[msg['role']] if msg['role'] in ['user', 'assistant', 'system'] else MessageRole.user
+            messages.append(ChatMessage(
+                content=msg['content'],
+                role=role
+            ))
+        
+        # Create prompt
+        prompt = Prompt(messages=messages)
+        
+        # Call the model using InferenceAPI
+        responses = await self.inference_api(
+            model_id=model_id,
+            prompt=prompt,
+            max_tokens=16384,
+            force_provider=provider if provider in ['anthropic', 'openai'] else None,
+        )
+        
+        # Return the first response's completion
+        return responses[0].completion
     
     async def _get_feedback(self, scenario: ScenarioEval) -> List[Dict[str, Any]]:
         """Get feedback from all providers."""
