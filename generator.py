@@ -411,3 +411,62 @@ async def generate_scenario_from_config(config_path: Path):
     scenario, metadata = await generator.generate_scenario()
     
     return scenario, metadata
+
+
+async def generate_sweep_from_config(config_path: Path, max_concurrent: int = 5):
+    """
+    Generate multiple scenarios from a sweep configuration file.
+    
+    Args:
+        config_path: Path to sweep config YAML/JSON
+        max_concurrent: Maximum number of concurrent generation tasks
+    """
+    from prefill_evals.config import load_sweep_config
+    import asyncio
+    
+    # Load sweep configs
+    configs = load_sweep_config(config_path)
+    
+    if not configs:
+        print("No configurations found in sweep config")
+        return []
+    
+    total = len(configs)
+    print(f"Starting sweep with {total} configurations (max {max_concurrent} concurrent)...")
+    
+    # Create semaphore to limit concurrency
+    semaphore = asyncio.Semaphore(max_concurrent)
+    
+    async def generate_with_semaphore(config, index):
+        async with semaphore:
+            print(f"\n[{index}/{total}] Starting generation for: {config.output_dir}")
+            
+            # Create generator
+            generator = ScenarioGenerator(config)
+            
+            # Generate scenario
+            try:
+                scenario, metadata = await generator.generate_scenario()
+                print(f"✓ [{index}/{total}] Successfully generated: {config.output_dir}")
+                return (scenario, metadata)
+            except Exception as e:
+                print(f"✗ [{index}/{total}] Failed to generate {config.output_dir}: {e}")
+                return None
+    
+    # Create tasks for all configs
+    tasks = [
+        generate_with_semaphore(config, i) 
+        for i, config in enumerate(configs, 1)
+    ]
+    
+    # Run all tasks concurrently
+    results = await asyncio.gather(*tasks)
+    
+    # Filter out None results (failed generations)
+    successful_results = [r for r in results if r is not None]
+    
+    print(f"\n{'='*60}")
+    print(f"Sweep complete! Generated {len(successful_results)}/{total} scenarios")
+    print(f"{'='*60}")
+    
+    return successful_results

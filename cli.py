@@ -6,6 +6,12 @@ import asyncio
 import argparse
 from pathlib import Path
 from typing import List, Optional
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+env_path = Path("/Users/cofibration/Documents/fellows-projects/rl-character-science-workspace/.env")
+if env_path.exists():
+    load_dotenv(env_path)
 
 from prefill_evals.config import load_config, EvalConfig
 from prefill_evals.parser import load_scenario_from_dir
@@ -166,6 +172,20 @@ def main():
         help="Path to generation config file (YAML or JSON)"
     )
     
+    # Generate sweep subcommand
+    sweep_parser = subparsers.add_parser('generate-sweep', help='Generate multiple scenarios from a sweep config')
+    sweep_parser.add_argument(
+        "config",
+        type=Path,
+        help="Path to sweep generation config file (YAML or JSON)"
+    )
+    sweep_parser.add_argument(
+        "--max-concurrent",
+        type=int,
+        default=5,
+        help="Maximum number of concurrent generation tasks (default: 5)"
+    )
+    
     args = parser.parse_args()
     
     if args.command == 'evaluate':
@@ -175,6 +195,10 @@ def main():
         # Run the async generation
         from prefill_evals.generator import generate_scenario_from_config
         asyncio.run(generate_scenario_from_config(args.config))
+    elif args.command == 'generate-sweep':
+        # Run the async sweep generation
+        from prefill_evals.generator import generate_sweep_from_config
+        asyncio.run(generate_sweep_from_config(args.config, max_concurrent=args.max_concurrent))
     else:
         parser.print_help()
 

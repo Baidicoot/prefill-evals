@@ -1,0 +1,54 @@
+# Example sweep configuration for generating multiple scenarios
+# This will generate scenarios for each directory matching the patterns in sweeps.input_dirs
+
+base:
+  # Common settings for all scenarios in the sweep
+  generator_model:
+    provider: anthropic
+    model_id: claude-3-5-sonnet-20241022
+  
+  prompts_dir: examples/generation_prompts/
+  
+  # Items to generate for each scenario
+  extra_items_to_generate:
+    - target_behavior
+    - misdeed
+  
+  # Feedback providers for scenario refinement
+  feedback_providers:
+    - name: coherence
+      model:
+        provider: anthropic
+        model_id: claude-3-5-sonnet-20241022
+      template_file: examples/feedback_templates/coherence.txt
+      
+    - name: realism
+      model:
+        provider: anthropic
+        model_id: claude-3-5-sonnet-20241022
+      template_file: examples/feedback_templates/realism.txt
+  
+  max_iterations: 3
+
+sweeps:
+  # Directories to sweep over (supports glob patterns)
+  input_dirs:
+    - examples/seed_items  # Single directory
+    # - inputs/security/*  # All subdirectories of inputs/security/
+    # - inputs/helpfulness/*  # All subdirectories of inputs/helpfulness/
+    # - inputs/edge_cases/set_*  # Directories matching pattern
+  
+  # Pattern for finding seed items in each directory
+  seed_items_pattern:
+    scenario_description: "scenario_description.txt"
+    context: "context.txt"
+    requirements: "requirements.txt"
+  
+  # Output directory template
+  # Available placeholders:
+  # - {folder_name}: Just the final directory name (e.g., "easy")
+  # - {folder_path}: Full relative path from config file (e.g., "inputs/security/easy")
+  output_dir_template: "generated_scenarios/{folder_path}"
+  # Other examples:
+  # output_dir_template: "outputs/{folder_name}"  # Flat structure
+  # output_dir_template: "results/{folder_path}/v1"  # Preserves input structure

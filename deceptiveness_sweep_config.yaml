@@ -1,0 +1,33 @@
+# Sweep configuration for deceptiveness scenarios
+
+base:
+  # Generator model
+  generator_model:
+    provider: anthropic
+    model_id: claude-sonnet-4-20250514
+  
+  # Prompts directory
+  prompts_dir: prefill_evals/examples/generation_prompts/
+  
+  # No extra items to generate (will use what's in the seed data)
+  extra_items_to_generate: []
+  
+  # No feedback providers for now
+  feedback_providers: []
+  
+  # Just one iteration per scenario
+  max_iterations: 1
+
+sweeps:
+  # Input directories to sweep over (3 levels deep to get to actual scenario folders)
+  input_dirs:
+    - ../scenarios/22_07/deceptiveness-sweep/*/*/*
+  
+  # Pattern for finding seed items in each directory
+  seed_items_pattern:
+    scenario: "scenario.txt"
+    behavior: "behavior.txt"
+    # No requirements.txt in these directories
+  
+  # Output directory preserving input structure
+  output_dir_template: "generated_scenarios/{folder_path}"

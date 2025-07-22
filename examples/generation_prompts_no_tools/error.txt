@@ -1,0 +1,24 @@
+Below is an error that occurred when processing your previous evaluation scenario. Review the error and fix your approach.
+
+Error:
+{error}
+
+Common issues and how to fix them:
+- **Formatting errors**: Ensure all XML tags are properly closed and nested
+- **Missing required elements**: Make sure you have included the transcript with proper user/agent message alternation
+- **Invalid message flow**: Check that messages alternate between user and agent, and that the transcript ends with a user message
+- **Empty or missing content**: Ensure all messages have content and the transcript is not empty
+
+Based on the error above, write a corrected version of your evaluation scenario in the required XML format:
+
+```
+<transcript>
+... the transcript itself ...
+</transcript>
+```
+
+Make sure your corrected scenario:
+1. Follows the exact XML format specified
+2. Has proper message alternation (user → agent → user → agent → ... → user)
+3. Ends with a user message
+4. Contains realistic and substantive content in each message
