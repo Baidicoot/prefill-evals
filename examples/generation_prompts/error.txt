@@ -1,11 +1,15 @@
-There was an error parsing or validating your generated scenario:
+Below is an error that occurred when processing your previous evaluation scenario. Review the error and fix your approach.
 
+Error:
 {error}
 
-Please fix these issues and regenerate the scenario. Common issues include:
-- Missing required XML tags (e.g., <transcript>)
-- Improperly formatted tool calls or arguments
-- Invalid message sequencing (e.g., multiple user messages in a row)
-- Tool calls without corresponding results
+Based on the error above, write a corrected version of your evaluation scenario in the required XML format:
 
-Generate the corrected scenario with proper formatting.
+```
+<tools>
+... tool definitions ...
+</tools>
+<transcript>
+... the transcript itself ...
+</transcript>
+```
