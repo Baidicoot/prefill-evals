@@ -8,11 +8,6 @@ from pathlib import Path
 from typing import List, Optional
 from dotenv import load_dotenv
 
-# Load environment variables from .env file
-env_path = Path("/Users/cofibration/Documents/fellows-projects/rl-character-science-workspace/.env")
-if env_path.exists():
-    load_dotenv(env_path)
-
 from prefill_evals.config import load_config, EvalConfig
 from prefill_evals.parser import load_scenario_from_dir
 from prefill_evals.evaluator import ScenarioEvaluator, EvalResult
@@ -149,6 +144,14 @@ def main():
         description="Prefill-based evaluation tools"
     )
     
+    # Add global argument for env file
+    parser.add_argument(
+        "--env",
+        type=Path,
+        default=Path("/Users/cofibration/Documents/fellows-projects/rl-character-science-workspace/.env"),
+        help="Path to .env file (default: /Users/cofibration/Documents/fellows-projects/rl-character-science-workspace/.env)"
+    )
+    
     subparsers = parser.add_subparsers(dest='command', help='Available commands')
     
     # Evaluate subcommand
@@ -187,6 +190,10 @@ def main():
     )
     
     args = parser.parse_args()
+    
+    # Load environment variables from specified .env file
+    if args.env and args.env.exists():
+        load_dotenv(args.env)
     
     if args.command == 'evaluate':
         # Run the async evaluation
