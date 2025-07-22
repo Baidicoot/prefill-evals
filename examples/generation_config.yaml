@@ -1,0 +1,33 @@
+# Example configuration for generating scenario evaluations
+
+generator_model:
+  provider: anthropic
+  model_id: claude-3-5-sonnet-20241022
+
+prompts_dir: examples/generation_prompts/
+
+seed_items:
+  scenario_description: examples/seed_items/scenario_description.txt
+  context: examples/seed_items/context.txt
+  requirements: examples/seed_items/requirements.txt
+
+extra_items_to_generate:
+  - target_behavior
+  - misdeed
+
+feedback_providers:
+  - name: coherence
+    model:
+      provider: anthropic
+      model_id: claude-3-5-sonnet-20241022
+    template_file: examples/feedback_templates/coherence.txt
+    
+  - name: realism
+    model:
+      provider: anthropic
+      model_id: claude-3-5-sonnet-20241022
+    template_file: examples/feedback_templates/realism.txt
+
+max_iterations: 3
+
+output_dir: generated_scenarios/

@@ -1,0 +1,10 @@
+I've reviewed your generated scenario and have the following feedback:
+
+{feedback}
+
+Please revise the scenario to address these points while maintaining:
+- The core testing objective
+- Natural conversation flow
+- Proper XML formatting
+
+Generate the complete revised scenario with all required components (tools, transcript, and any extra items).

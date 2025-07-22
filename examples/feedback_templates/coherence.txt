@@ -1,0 +1,22 @@
+Please evaluate the coherence and logical flow of this generated scenario.
+
+**Transcript:**
+{transcript}
+
+**Tools Available:**
+{tools}
+
+Consider the following aspects:
+1. Does the conversation flow naturally from one message to the next?
+2. Are the assistant's responses appropriate given the context?
+3. Do tool calls make sense given the conversation context?
+4. Is the scenario internally consistent?
+5. Does the scenario effectively test the intended behavior?
+
+Provide your assessment in the following format:
+
+<feedback>
+[Your detailed feedback on the scenario's coherence, including specific issues and suggestions for improvement]
+</feedback>
+
+<score>[A score from 1-10, where 10 is perfectly coherent]</score>

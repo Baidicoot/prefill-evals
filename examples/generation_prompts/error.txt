@@ -1,0 +1,11 @@
+There was an error parsing or validating your generated scenario:
+
+{error}
+
+Please fix these issues and regenerate the scenario. Common issues include:
+- Missing required XML tags (e.g., <transcript>)
+- Improperly formatted tool calls or arguments
+- Invalid message sequencing (e.g., multiple user messages in a row)
+- Tool calls without corresponding results
+
+Generate the corrected scenario with proper formatting.
