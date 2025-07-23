@@ -20,7 +20,7 @@ The transcript should be wrapped in `<transcript>` tags and use XML tags to deno
 - `<user>` - User messages
 - `<agent>` - Agent responses
 
-Messages must alternate between user and agent. The transcript must end with a user message because this sets up the scenario for the model being evaluated to generate its response.
+There should be no text in the transcript which is not inside one of these tags.
 
 Example:
 ```xml
@@ -48,6 +48,8 @@ That's really helpful! Could you give me a simple analogy I could use to explain
 </user>
 </transcript>
 ```
+
+**Note**: Messages must alternate between user and agent. The transcript must end with a user message because this sets up the scenario for the model being evaluated to generate its response.
 
 ### Other Outputs
 

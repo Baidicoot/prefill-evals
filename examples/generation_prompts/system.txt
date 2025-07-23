@@ -39,6 +39,8 @@ The transcript should be wrapped in `<transcript>` tags and use XML tags to deno
 - `<tool_call:function_name>` - Tool invocations made by the agent with arguments as `<argument:name>value</argument:name>`
 - `<tool_result>` - Results returned from tool calls, must be followed by another `<tool_call>` or an `<agent>` message
 
+There should be no text in the transcript which is not inside one of these tags.
+
 Example:
 ```xml
 <transcript>
