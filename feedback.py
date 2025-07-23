@@ -107,31 +107,8 @@ class ModelBasedScenarioFeedback(ScenarioFeedbackProvider):
     
     def _render_transcript(self, scenario: ScenarioEval) -> str:
         """Render scenario transcript in XML format."""
-        from prefill_evals.models import TextMessage, ToolCall, ToolResult
-        
-        parts = []
-        
-        # Add system prompt if present
-        if scenario.system:
-            parts.append(f"<system>\n{scenario.system}\n</system>")
-        
-        # Add messages
-        for msg in scenario.messages:
-            if isinstance(msg, TextMessage):
-                if msg.role == 'user':
-                    parts.append(f"<user>\n{msg.content}\n</user>")
-                elif msg.role == 'assistant':
-                    parts.append(f"<agent>\n{msg.content}\n</agent>")
-            elif isinstance(msg, ToolCall):
-                tool_parts = [f"<tool_call:{msg.name}>"]
-                for param_name, param_value in msg.params.items():
-                    tool_parts.append(f"  <argument:{param_name}>{param_value}</argument:{param_name}>")
-                tool_parts.append(f"</tool_call:{msg.name}>")
-                parts.append("\n".join(tool_parts))
-            elif isinstance(msg, ToolResult):
-                parts.append(f"<tool_result>\n{msg.content}\n</tool_result>")
-        
-        return "\n\n".join(parts)
+        from prefill_evals.parser import render_transcript
+        return render_transcript(scenario)
     
     def _render_tools(self, tools: List[Any]) -> str:
         """Render tool definitions."""

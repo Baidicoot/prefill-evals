@@ -132,13 +132,19 @@ def to_anthropic_format(messages: List[AgentMessage]) -> List[Dict[str, Any]]:
             result.append({"role": msg.role, "content": msg.content})
         elif isinstance(msg, ToolCall):
             if len(result) == 0 or result[-1]["role"] != "assistant":
-                result.append({"role": "assistant", "content": ""})
+                result.append({"role": "assistant", "content": []})
             previous_msg = result.pop(-1)
             if isinstance(previous_msg["content"], str):
-                previous_msg["content"] = [{
-                    "type": "text",
-                    "text": previous_msg["content"]
-                }]
+                if previous_msg["content"]:  # Only add text block if content is non-empty
+                    previous_msg["content"] = [{
+                        "type": "text",
+                        "text": previous_msg["content"]
+                    }]
+                else:
+                    previous_msg["content"] = []
+            elif not isinstance(previous_msg["content"], list):
+                # Ensure content is a list
+                previous_msg["content"] = []
             previous_msg["content"].append({
                 "id": msg.id,
                 "type": "tool_use",
@@ -147,11 +153,11 @@ def to_anthropic_format(messages: List[AgentMessage]) -> List[Dict[str, Any]]:
             })
             result.append(previous_msg)
         elif isinstance(msg, ToolResult):
-            result.append({"role": "user", "content": {
+            result.append({"role": "user", "content": [{
                 "type": "tool_result",
                 "tool_use_id": msg.tool_call_id,
                 "content": msg.content
-            }})
+            }]})
     
     return result
 
@@ -174,27 +180,28 @@ class ToolDefinition:
         properties = {}
         required = []
         
-        for param in self.parameters:
-            param_name = param["name"]
-            param_type = param.get("type", "string")
-            
-            # Map types to JSON Schema types
-            type_mapping = {
-                "string": "string",
-                "integer": "integer",
-                "number": "number",
-                "boolean": "boolean",
-                "array": "array",
-                "object": "object"
-            }
-            
-            properties[param_name] = {
-                "type": type_mapping.get(param_type, "string"),
-                "description": param.get("description", "")
-            }
-            
-            if not param.get("optional", False):
-                required.append(param_name)
+        if self.parameters:
+            for param in self.parameters:
+                param_name = param.name
+                param_type = param.type
+                
+                # Map types to JSON Schema types
+                type_mapping = {
+                    "string": "string",
+                    "integer": "integer",
+                    "number": "number",
+                    "boolean": "boolean",
+                    "array": "array",
+                    "object": "object"
+                }
+                
+                properties[param_name] = {
+                    "type": type_mapping.get(param_type, "string"),
+                    "description": param.description
+                }
+                
+                if not param.optional:
+                    required.append(param_name)
         
         return {
             "type": "function",
@@ -214,27 +221,28 @@ class ToolDefinition:
         properties = {}
         required = []
         
-        for param in self.parameters:
-            param_name = param["name"]
-            param_type = param.get("type", "string")
-            
-            # Map types to JSON Schema types
-            type_mapping = {
-                "string": "string",
-                "integer": "integer",
-                "number": "number",
-                "boolean": "boolean",
-                "array": "array",
-                "object": "object"
-            }
-            
-            properties[param_name] = {
-                "type": type_mapping.get(param_type, "string"),
-                "description": param.get("description", "")
-            }
-            
-            if not param.get("optional", False):
-                required.append(param_name)
+        if self.parameters:
+            for param in self.parameters:
+                param_name = param.name
+                param_type = param.type
+                
+                # Map types to JSON Schema types
+                type_mapping = {
+                    "string": "string",
+                    "integer": "integer",
+                    "number": "number",
+                    "boolean": "boolean",
+                    "array": "array",
+                    "object": "object"
+                }
+                
+                properties[param_name] = {
+                    "type": type_mapping.get(param_type, "string"),
+                    "description": param.description
+                }
+                
+                if not param.optional:
+                    required.append(param_name)
         
         return {
             "name": self.name,
@@ -313,55 +321,59 @@ def validate_scenario(scenario: ScenarioEval) -> List[str]:
             
         return position_desc
     
-    # Check message sequence
-    expected_role = 'user'  # First message should be user
+    # State machine for valid transitions
+    # Key: current state, Value: list of valid next states
+    transitions = {
+        'start': ['user', 'system'],
+        'system': ['user'],
+        'user': ['assistant', 'tool_call'],
+        'assistant': ['user', 'tool_call'],
+        'tool_call': ['tool_result'],
+        'tool_result': ['assistant', 'user', 'tool_call']
+    }
+    
+    current_state = 'start'
     pending_tool_calls = {}  # Map tool_call_id to ToolCall object
     
     for i, msg in enumerate(messages):
+        # Determine the message type for state machine
         if isinstance(msg, TextMessage):
-            actual_role = msg.role
+            msg_type = msg.role  # 'user', 'assistant', or 'system'
+        elif isinstance(msg, ToolCall):
+            msg_type = 'tool_call'
+        elif isinstance(msg, ToolResult):
+            msg_type = 'tool_result'
+        else:
+            continue  # Skip unknown message types
+        
+        # Check if this transition is valid
+        valid_next_states = transitions.get(current_state, [])
+        if msg_type not in valid_next_states:
+            prev_msg = messages[i-1] if i > 0 else None
+            error = f"ERROR: Invalid message sequence at {describe_position(i, messages)}\n"
+            error += f"  Context: After \"{get_message_preview(prev_msg)}\" (state: {current_state})\n"
+            error += f"  Problem: Found {msg_type} message, but expected one of: {', '.join(valid_next_states)}\n"
+            error += f"  Current: \"{get_message_preview(msg)}\"\n"
+            errors.append(error)
+        
+        # Handle specific message types
+        if isinstance(msg, TextMessage):
+            if msg.role == 'user' and pending_tool_calls:
+                # User message with unresolved tool calls
+                first_pending = next(iter(pending_tool_calls.values()))
+                error = f"ERROR: Unresolved tool call before {describe_position(i, messages)}\n"
+                error += f"  Problem: Tool call '{first_pending.name}' (ID: {first_pending.id}) was made but never received a result\n"
+                error += f"  Context: The agent cannot proceed to the next user message with pending tool calls\n"
+                error += f"  Fix: Add <agentml:tool_result>...</agentml:tool_result> after the tool call"
+                errors.append(error)
             
-            if actual_role == 'user':
-                if expected_role != 'user':
-                    prev_msg = messages[i-1] if i > 0 else None
-                    error = f"ERROR: Unexpected user message at {describe_position(i, messages)}\n"
-                    error += f"  Context: After \"{get_message_preview(prev_msg)}\"\n"
-                    error += f"  Problem: Expected an agent response, but found another user message\n"
-                    error += f"  Current: \"{get_message_preview(msg)}\"\n"
-                    error += f"  Fix: Ensure the agent responds before the user speaks again"
-                    errors.append(error)
-                
-                if pending_tool_calls:
-                    # Find the first pending tool call
-                    first_pending = next(iter(pending_tool_calls.values()))
-                    error = f"ERROR: Unresolved tool call before {describe_position(i, messages)}\n"
-                    error += f"  Problem: Tool call '{first_pending.name}' (ID: {first_pending.id}) was made but never received a result\n"
-                    error += f"  Context: The agent cannot proceed to the next user message with pending tool calls\n"
-                    error += f"  Fix: Add <agentml:tool_result>...</agentml:tool_result> after the tool call"
-                    errors.append(error)
-                
-                expected_role = "assistant"
-                
-            elif actual_role == "assistant":
-                if expected_role != "assistant":
-                    prev_msg = messages[i-1] if i > 0 else None
-                    error = f"ERROR: Unexpected agent message at {describe_position(i, messages)}\n"
-                    error += f"  Context: After \"{get_message_preview(prev_msg)}\"\n"
-                    error += f"  Problem: Expected a user message, but found another agent response\n"
-                    error += f"  Current: \"{get_message_preview(msg)}\"\n"
-                    error += f"  Fix: Add a user message before this agent response"
-                    errors.append(error)
-                
-                # Agent messages don't change expected role until we see what follows
-                
-            elif actual_role == 'system':
-                # System messages are allowed anywhere
-                pass
+            # Update state
+            current_state = msg.role
                 
         elif isinstance(msg, ToolCall):
-            # Tool calls should follow agent text (or another tool call)
+            # Track pending tool calls
             pending_tool_calls[msg.id] = msg
-            expected_role = 'tool'  # Expect tool result next
+            current_state = 'tool_call'
             
         elif isinstance(msg, ToolResult):
             if msg.tool_call_id not in pending_tool_calls:
@@ -378,14 +390,9 @@ def validate_scenario(scenario: ScenarioEval) -> List[str]:
             else:
                 # Remove from pending
                 del pending_tool_calls[msg.tool_call_id]
-                
-            # After tool result, we might have more agent text or user message
-            if i + 1 < len(messages):
-                next_msg = messages[i + 1]
-                if isinstance(next_msg, TextMessage) and next_msg.role == 'user':
-                    expected_role = 'user'
-                else:
-                    expected_role = "assistant"
+            
+            # Update state
+            current_state = 'tool_result'
     
     # Check for pending tool calls
     if pending_tool_calls:

@@ -34,6 +34,9 @@ Write the complete evaluation scenario in the required XML format:
 <transcript>
 ... the transcript itself ...
 </transcript>
+<summary>
+... overview of the evaluation-relevant parts of the transcript ...
+</summary>
 ```
 
 Remember that the transcript should:

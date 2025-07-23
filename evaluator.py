@@ -10,11 +10,57 @@ from pathlib import Path
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 import asyncio
+import time
+import logging
+from functools import wraps
 
 from dotenv import load_dotenv
 
 from anthropic import Anthropic
 from openai import OpenAI
+
+# Configure logging
+logger = logging.getLogger(__name__)
+
+def exponential_backoff_retry(max_retries: int = 10, base_delay: float = 1.0, max_delay: float = 60.0):
+    """
+    Decorator for retrying async functions with exponential backoff.
+    
+    Args:
+        max_retries: Maximum number of retry attempts
+        base_delay: Initial delay between retries in seconds
+        max_delay: Maximum delay between retries in seconds
+    """
+    def decorator(func):
+        @wraps(func)
+        async def wrapper(*args, **kwargs):
+            last_exception = None
+            
+            for attempt in range(max_retries + 1):
+                try:
+                    return await func(*args, **kwargs)
+                except Exception as e:
+                    last_exception = e
+                    
+                    if attempt == max_retries:
+                        logger.error(f"Failed after {max_retries + 1} attempts: {str(e)}")
+                        raise
+                    
+                    # Calculate delay with exponential backoff
+                    delay = min(base_delay * (2 ** attempt), max_delay)
+                    
+                    logger.warning(
+                        f"Attempt {attempt + 1} failed for {func.__name__}: {str(e)}. "
+                        f"Retrying in {delay:.1f} seconds..."
+                    )
+                    
+                    await asyncio.sleep(delay)
+            
+            # This should never be reached, but just in case
+            raise last_exception
+        
+        return wrapper
+    return decorator
 
 @dataclass
 class ResponseGrading:
@@ -74,6 +120,19 @@ class ScenarioEvaluator:
         self.anthropic_client = Anthropic()
         self.openai_client = OpenAI()
 
+    @exponential_backoff_retry(max_retries=5, base_delay=1.0, max_delay=60.0)
+    async def _call_anthropic_api(self, params: dict) -> str:
+        """Make a single API call to Anthropic with retry logic."""
+        response = self.anthropic_client.messages.create(**params)
+        
+        # Extract only text content from the response
+        response_text = ""
+        for content_block in response.content:
+            if content_block.type == "text":
+                response_text += content_block.text
+        
+        return response_text.strip()
+
     async def run_anthropic_model(self, model_id: str, num_runs: int = 1) -> List[str]:
         """Run Anthropic model on the scenario eval."""
         responses = []
@@ -86,7 +145,7 @@ class ScenarioEvaluator:
         if self.eval.tools:
             tools = [tool.to_anthropic_format() for tool in self.eval.tools]
         
-        for _ in range(num_runs):
+        for run_idx in range(num_runs):
             # Create the API call parameters
             params = {
                 "model": model_id,
@@ -102,19 +161,26 @@ class ScenarioEvaluator:
             if tools:
                 params["tools"] = tools
             
-            # Make the API call
-            response = self.anthropic_client.messages.create(**params)
-            
-            # Extract only text content from the response
-            response_text = ""
-            for content_block in response.content:
-                if content_block.type == "text":
-                    response_text += content_block.text
-            
-            responses.append(response_text.strip())
+            try:
+                # Make the API call with retry logic
+                response_text = await self._call_anthropic_api(params)
+                responses.append(response_text)
+            except Exception as e:
+                logger.error(f"Failed to get response from {model_id} (run {run_idx + 1}/{num_runs}): {str(e)}")
+                raise
         
         return responses
     
+    @exponential_backoff_retry(max_retries=5, base_delay=1.0, max_delay=60.0)
+    async def _call_openai_api(self, params: dict) -> str:
+        """Make a single API call to OpenAI with retry logic."""
+        response = self.openai_client.chat.completions.create(**params)
+        
+        # Extract only text content from the response
+        response_text = response.choices[0].message.content or ""
+        
+        return response_text.strip()
+
     async def run_openai_model(self, model_id: str, num_runs: int = 1) -> List[str]:
         """Run OpenAI model on the scenario eval."""
         responses = []
@@ -131,7 +197,7 @@ class ScenarioEvaluator:
         if self.eval.tools:
             tools = [tool.to_openai_format() for tool in self.eval.tools]
         
-        for _ in range(num_runs):
+        for run_idx in range(num_runs):
             # Create the API call parameters
             params = {
                 "model": model_id,
@@ -143,13 +209,13 @@ class ScenarioEvaluator:
             if tools:
                 params["tools"] = tools
             
-            # Make the API call
-            response = self.openai_client.chat.completions.create(**params)
-            
-            # Extract only text content from the response
-            response_text = response.choices[0].message.content or ""
-            
-            responses.append(response_text.strip())
+            try:
+                # Make the API call with retry logic
+                response_text = await self._call_openai_api(params)
+                responses.append(response_text)
+            except Exception as e:
+                logger.error(f"Failed to get response from {model_id} (run {run_idx + 1}/{num_runs}): {str(e)}")
+                raise
         
         return responses
     
@@ -162,8 +228,22 @@ class ScenarioEvaluator:
             raise ValueError(f"Unsupported model provider: {provider}")
     
     async def grade_response(self, response: str, eval: ScenarioEval) -> List[ResponseGrading]:
-        grades = await asyncio.gather(*[grader.grade(response, eval) for grader in self.graders])
-        return grades
+        # Use gather with return_exceptions=True to handle grading errors gracefully
+        grades = await asyncio.gather(
+            *[grader.grade(response, eval) for grader in self.graders],
+            return_exceptions=True
+        )
+        
+        # Process results, logging errors but returning None for failed grades
+        processed_grades = []
+        for i, grade in enumerate(grades):
+            if isinstance(grade, Exception):
+                logger.error(f"Grading error for grader {i}: {str(grade)}")
+                processed_grades.append(None)
+            else:
+                processed_grades.append(grade)
+        
+        return processed_grades
     
     async def run_eval(self, provider: str, model_id: str, num_runs: int = 1) -> EvalResult:
         responses = await self.run_model(provider, model_id, num_runs)

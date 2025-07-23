@@ -425,6 +425,8 @@ def parse_and_validate_items(
             print(f"Validation errors found: {len(validation_errors)}")
             for error in validation_errors:
                 print(f"  {error}")
+            # Raise exception to allow caller to handle validation errors
+            raise ValueError(f"Scenario validation failed with {len(validation_errors)} errors")
     
     return scenario
 
@@ -487,9 +489,91 @@ def load_scenario_from_dir(
     )
 
 
+def render_transcript(scenario: 'ScenarioEval') -> str:
+    """
+    Render a ScenarioEval as an XML-formatted transcript string.
+    
+    Args:
+        scenario: ScenarioEval object containing messages and optional system prompt
+        
+    Returns:
+        XML-formatted transcript string
+    """
+    from prefill_evals.models import TextMessage, ToolCall, ToolResult
+    
+    parts = []
+    
+    # Add system prompt if present
+    if scenario.system:
+        parts.append(f"<system>\n{scenario.system}\n</system>")
+    
+    # Add messages
+    for msg in scenario.messages:
+        if isinstance(msg, TextMessage):
+            if msg.role == 'user':
+                parts.append(f"<user>\n{msg.content}\n</user>")
+            elif msg.role == 'assistant':
+                parts.append(f"<agent>\n{msg.content}\n</agent>")
+        elif isinstance(msg, ToolCall):
+            tool_parts = [f"<tool_call:{msg.name}>"]
+            for param_name, param_value in msg.params.items():
+                tool_parts.append(f"  <argument:{param_name}>{param_value}</argument:{param_name}>")
+            tool_parts.append(f"</tool_call:{msg.name}>")
+            parts.append("\n".join(tool_parts))
+        elif isinstance(msg, ToolResult):
+            parts.append(f"<tool_result>\n{msg.content}\n</tool_result>")
+    
+    return "\n\n".join(parts)
+
+
+def parse_xml_tags(content: str, tags: List[str], required_tags: Optional[List[str]] = None) -> Dict[str, str]:
+    """
+    Parse XML-style tags from content into a dictionary.
+    
+    Args:
+        content: Content with XML tags
+        tags: List of tag names to extract
+        required_tags: List of tags that must be present (raises ValueError if missing)
+        
+    Returns:
+        Dict mapping tag names to their content
+        
+    Raises:
+        ValueError: If required tags are missing or tags are malformed
+    """
+    result = {}
+    required_tags = required_tags or []
+    
+    for tag in tags:
+        # Find opening tag
+        opening_tag = f"<{tag}>"
+        closing_tag = f"</{tag}>"
+        
+        start_pos = content.find(opening_tag)
+        if start_pos != -1:
+            # Found opening tag
+            end_pos = content.find(closing_tag, start_pos)
+            if end_pos == -1:
+                raise ValueError(f"Found opening {opening_tag} but no closing {closing_tag}")
+            
+            # Extract content between tags
+            tag_content = content[start_pos + len(opening_tag):end_pos].strip()
+            result[tag] = tag_content
+        else:
+            # Tag not found
+            if tag in required_tags:
+                raise ValueError(f"Missing required <{tag}> tag")
+            result[tag] = None
+    
+    return result
+
+
 def parse_generated_output(content: str, expected_items: List[str]) -> Dict[str, str]:
     """
     Parse XML-wrapped generation output into tools, transcript, and extra items.
+    
+    This is a specialized function for parsing generator output which requires
+    a transcript tag and optionally includes tools and extra items.
     
     Expected format:
     <tools>
@@ -512,42 +596,18 @@ def parse_generated_output(content: str, expected_items: List[str]) -> Dict[str,
     Raises:
         ValueError: If required tags are missing
     """
-    result = {}
+    # Parse all tags: tools (optional), transcript (required), and any expected items
+    all_tags = ['tools', 'transcript'] + expected_items
     
-    # Parse tools (optional)
-    tools_start = content.find("<tools>")
-    if tools_start != -1:
-        tools_end = content.find("</tools>", tools_start)
-        if tools_end == -1:
-            raise ValueError("Found opening <tools> tag but no closing </tools> tag")
-        tools_content = content[tools_start + 7:tools_end].strip()
-        result['tools'] = tools_content
-    else:
+    # Only transcript is required for generation output
+    result = parse_xml_tags(content, all_tags, required_tags=['transcript'])
+    
+    # Additional validation for generation output
+    if not result.get('transcript'):
+        raise ValueError("Transcript content cannot be empty")
+    
+    # Ensure tools is None if not present (for consistency)
+    if 'tools' not in result or result['tools'] is None:
         result['tools'] = None
-    
-    # Parse transcript (required)
-    transcript_start = content.find("<transcript>")
-    if transcript_start == -1:
-        raise ValueError("Missing required <transcript> tag in generated output")
-    
-    transcript_end = content.find("</transcript>", transcript_start)
-    if transcript_end == -1:
-        raise ValueError("Found opening <transcript> tag but no closing </transcript> tag")
-    
-    transcript_content = content[transcript_start + 12:transcript_end].strip()
-    result['transcript'] = transcript_content
-    
-    # Parse extra items
-    for item_name in expected_items:
-        item_start = content.find(f"<{item_name}>")
-        if item_start != -1:
-            item_end = content.find(f"</{item_name}>", item_start)
-            if item_end == -1:
-                raise ValueError(f"Found opening <{item_name}> tag but no closing </{item_name}> tag")
-            item_content = content[item_start + len(f"<{item_name}>"):item_end].strip()
-            result[item_name] = item_content
-        else:
-            # Item is optional, so we don't raise an error
-            result[item_name] = None
     
     return result

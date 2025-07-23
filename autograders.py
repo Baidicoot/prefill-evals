@@ -1,14 +1,11 @@
 from typing import Optional, Dict, Any, List, Tuple
 
-from evaluator import ResponseGrader
+from prefill_evals.evaluator import ResponseGrader, ResponseGrading
+from prefill_evals.config import ModelBasedResponseGraderConfig
+from prefill_evals.models import ScenarioEval
+from prefill_evals.parser import parse_xml_tags, render_transcript
 
 from safetytooling.apis import InferenceAPI
-
-from config import ModelBasedResponseGraderConfig
-from models import ScenarioEval
-from evaluator import ResponseGrading
-
-from parser import unwrap_xml_output
 
 from pathlib import Path
 
@@ -37,17 +34,19 @@ class ModelBasedResponseGrader(ResponseGrader):
     async def grade(self, response: str, eval: ScenarioEval) -> Optional[ResponseGrading]:
         input_items = eval.extra_items if eval.extra_items is not None else {}
         input_items["response"] = response
+        input_items["transcript"] = render_transcript(eval)
         
         formated_prompt = self.prompt.format(**input_items)
         response = await self.api.ask_single_question(
             question=formated_prompt,
-            system_prompt=self.system_prompt
+            system_prompt=self.system_prompt,
             model_id=self.config.grader.model_id,
             force_provider=self.config.grader.provider
         )
         output_items = self.config.extra_items if self.config.extra_items is not None else []
         output_items.append("grade")
-        parsed_output = unwrap_xml_output(response[0], output_items)
+        # Use the general XML parser for autograder output
+        parsed_output = parse_xml_tags(response[0], output_items, required_tags=['grade'])
 
         if "grade" not in parsed_output:
             return None

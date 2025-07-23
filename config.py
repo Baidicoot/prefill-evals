@@ -4,7 +4,7 @@ Configuration data models and loading for conversation pre-fill eval generation.
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Any, Union
+from typing import Dict, List, Optional, Tuple, Any
 import yaml
 import json
 import glob
@@ -26,7 +26,7 @@ class EvalConfig:
     models: List[ModelConfig]
     runs_per_model: int
     autograders: List[ModelBasedResponseGraderConfig]
-    scenarios: Union[Path, List[Path]]
+    scenarios: List[Path]  # Always a list now, populated via glob expansion
     extra_items: Optional[List[str]] = None
 
 
@@ -95,14 +95,23 @@ def load_config(config_path: Path) -> EvalConfig:
             extra_items=grader_data.get('extra_items')
         ))
     
-    # Parse scenarios - can be a single path or list of paths
+    # Parse scenarios - always treat as glob patterns (direct paths work too)
     scenarios_data = config_data.get('scenarios')
     if isinstance(scenarios_data, str):
-        scenarios = Path(scenarios_data)
+        # Single glob pattern
+        matched_paths = glob.glob(scenarios_data, recursive=True)
+        scenarios = [Path(p) for p in matched_paths if Path(p).is_dir()]
     elif isinstance(scenarios_data, list):
-        scenarios = [Path(s) for s in scenarios_data]
+        # Multiple glob patterns
+        scenarios = []
+        for pattern in scenarios_data:
+            matched_paths = glob.glob(pattern, recursive=True)
+            scenarios.extend([Path(p) for p in matched_paths if Path(p).is_dir()])
     else:
-        raise ValueError("scenarios must be a path string or list of path strings")
+        raise ValueError("scenarios must be a glob pattern string or list of glob patterns")
+    
+    if not scenarios:
+        raise ValueError(f"No directories found matching pattern(s): {scenarios_data}")
     
     return EvalConfig(
         models=models,
