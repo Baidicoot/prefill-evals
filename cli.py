@@ -15,7 +15,7 @@ import logging
 import traceback
 
 # Set up logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.ERROR, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 try:
@@ -39,10 +39,11 @@ except ImportError:
         def close(self):
             print()  # New line at the end
 
-from prefill_evals.config import load_config, EvalConfig
+from prefill_evals.config import load_config, EvalConfig, ModelBasedResponseGraderConfig, StringMatchGraderConfig
 from prefill_evals.parser import load_scenario_from_dir
 from prefill_evals.evaluator import ScenarioEvaluator, EvalResult, ResponseGrading
-from prefill_evals.autograders import ModelBasedResponseGrader
+from prefill_evals.models import ScenarioEval
+from prefill_evals.autograders import ModelBasedResponseGrader, StringMatchGrader
 
 
 def serialize_response_grading(grading: Optional[ResponseGrading]) -> Optional[Dict[str, Any]]:
@@ -170,50 +171,97 @@ class ProgressiveResultsSaver:
             temp_path.replace(self.output_path)
 
 
+def truncate_model_name(model_name: str, max_length: int = 20) -> str:
+    """Truncate model name to last N characters if needed."""
+    if len(model_name) <= max_length:
+        return model_name
+    return "..." + model_name[-(max_length - 3):]
+
+
+def get_short_name(model_name: str) -> str:
+    """Get a short, readable version of model names.
+    
+    - For claude-* models: extract middle parts (e.g. claude-3-7-sonnet-latest -> 3-7-sonnet)
+    - For OpenAI finetunes (ft:*): extract meaningful suffix (e.g. ft:...:name:id -> name or name:ckpt-step-N)
+    - Otherwise: truncate to first 16 characters
+    """
+    # Remove provider prefix if present (e.g. "openai/gpt-4" -> "gpt-4")
+    if "/" in model_name:
+        parts = model_name.split("/", 1)
+        if len(parts) == 2:
+            model_name = parts[1]
+    
+    # Handle Claude models
+    if model_name.startswith("claude-"):
+        parts = model_name.split("-")
+        if len(parts) > 2:
+            # Remove first (claude) and last (version/date) parts
+            return "-".join(parts[1:-1])
+    
+    # Handle OpenAI finetunes
+    elif model_name.startswith("ft:"):
+        parts = model_name.split(":")
+        if len(parts) >= 2:
+            # Check if last part looks like ckpt-step-N
+            last_part = parts[-1]
+            if last_part.startswith("ckpt-step-") and len(parts) >= 4:
+                # Get the meaningful name and checkpoint
+                name_part = parts[-3]
+                # Shorten ckpt-step-N to step-N
+                checkpoint = last_part.replace("ckpt-", "")
+                suffix = f":{checkpoint}"
+                # Truncate name part to fit in 20 chars total
+                max_name_len = 20 - len(suffix)
+                if len(name_part) > max_name_len:
+                    name_part = name_part[:max_name_len]
+                return f"{name_part}{suffix}"
+            elif len(parts) >= 3:
+                # Return second-last part (meaningful name when no checkpoint)
+                name_part = parts[-2]
+                # Truncate if too long
+                if len(name_part) > 20:
+                    return name_part[:20]
+                return name_part
+    
+    # Default: truncate to first 16 characters
+    if len(model_name) > 16:
+        return model_name[:16]
+    return model_name
+
+
 class EvaluationProgress:
     """Track evaluation progress and statistics."""
     
     def __init__(self):
-        self.completed_scenarios = 0
-        self.failed_scenarios = 0
+        self.completed_evaluations = 0
         self.error_count = 0  # Track individual evaluation errors
-        self.model_scores = defaultdict(list)  # model_id -> list of scores
-        self.grader_scores = defaultdict(list)  # grader_name -> list of scores
+        self.model_scores = defaultdict(list)  # model_id -> list of average scores
         self.errors_by_model = defaultdict(int)  # Track errors per model
         self.lock = asyncio.Lock()
     
-    async def update(self, scenario_results: List[EvalResult], scenario_path: Path, failed: bool = False):
+    async def update(self, scenario_results: List[EvalResult], scenario_path: Path):
         """Update progress statistics."""
         async with self.lock:
-            if failed:
-                self.failed_scenarios += 1
-            else:
-                self.completed_scenarios += 1
+            # Update scores
+            for result in scenario_results:
+                self.completed_evaluations += 1
+                model_key = f"{result.provider}/{result.model_id}"
                 
-                # Update scores
-                for result in scenario_results:
-                    model_key = f"{result.provider}/{result.model_id}"
+                if result.grades and any(result.grades):
+                    # Calculate average score across all graders and runs
+                    all_scores = []
+                    for response_grades in result.grades:
+                        for grade in response_grades:
+                            if grade is not None and hasattr(grade, 'score'):
+                                all_scores.append(grade.score)
                     
-                    if result.grades and result.grades[0]:
-                        # Average scores across runs for this scenario
-                        for grader_idx in range(len(result.grades[0])):
-                            scores = []
-                            for response_grades in result.grades:
-                                if grader_idx < len(response_grades) and response_grades[grader_idx] is not None:
-                                    scores.append(response_grades[grader_idx].score)
-                            
-                            if scores:
-                                avg_score = sum(scores) / len(scores)
-                                self.model_scores[model_key].append(avg_score)
-                                # Assuming single grader for now
-                                self.grader_scores["deceptiveness"].append(avg_score)
+                    if all_scores:
+                        avg_score = sum(all_scores) / len(all_scores)
+                        self.model_scores[model_key].append(avg_score)
     
     def get_summary(self) -> str:
         """Get current progress summary."""
-        summary_parts = [f"✓ {self.completed_scenarios}"]
-        
-        if self.failed_scenarios > 0:
-            summary_parts.append(f"✗ {self.failed_scenarios}")
+        summary_parts = [f"✓ {self.completed_evaluations}"]
         
         if self.error_count > 0:
             summary_parts.append(f"⚠ {self.error_count} errors")
@@ -224,12 +272,14 @@ class EvaluationProgress:
             for model, scores in sorted(self.model_scores.items()):
                 if scores:
                     avg = sum(scores) / len(scores)
+                    # Get short model name for display
+                    display_name = get_short_name(model)
                     # Add error count for this model if any
                     errors = self.errors_by_model.get(model, 0)
                     if errors > 0:
-                        avg_scores.append(f"{model}: {avg:.1f} (⚠{errors})")
+                        avg_scores.append(f"{display_name}: {avg:.1f} (⚠{errors})")
                     else:
-                        avg_scores.append(f"{model}: {avg:.1f}")
+                        avg_scores.append(f"{display_name}: {avg:.1f}")
             
             if avg_scores:
                 summary_parts.append("│ Avg: " + ", ".join(avg_scores))
@@ -270,83 +320,104 @@ def save_eval_results(results: List[EvalResult], output_path: Path):
     print(f"\n[Results would be saved to: {output_path}]")
 
 
-async def evaluate_single_scenario(
+async def evaluate_model_on_scenario(
+    model_config: Any,
+    scenario_path: Path,
+    evaluator: ScenarioEvaluator,
+    config: EvalConfig,
+    semaphore: asyncio.Semaphore,
+    progress: EvaluationProgress,
+    results_saver: Optional[ProgressiveResultsSaver] = None
+) -> Optional[EvalResult]:
+    """Evaluate a single model on a single scenario."""
+    try:
+        # Only hold semaphore for the actual API calls
+        async with semaphore:
+            result = await evaluator.run_eval(
+                provider=model_config.provider,
+                model_id=model_config.model_id,
+                num_runs=config.runs_per_model
+            )
+        
+        # Save successful result progressively if saver is provided
+        if results_saver:
+            await results_saver.save_result(result, scenario_path)
+        
+        return result
+        
+    except Exception as e:
+        # Log the error with full context
+        error_msg = f"Error evaluating {model_config.provider}/{model_config.model_id} on {scenario_path}: {str(e)}"
+        logger.error(error_msg)
+        logger.debug(f"Full traceback:\n{traceback.format_exc()}")
+        
+        # Create and save error result
+        if results_saver:
+            error_result = create_error_result(
+                model_config.provider,
+                model_config.model_id,
+                e,
+                scenario_path
+            )
+            await results_saver.save_error(error_result)
+        
+        # Track error in progress
+        async with progress.lock:
+            progress.error_count += 1
+            progress.errors_by_model[f"{model_config.provider}/{model_config.model_id}"] += 1
+        
+        return None
+
+
+async def evaluate_model_scenario_pair(
+    model_config: Any,
     scenario_path: Path,
     config: EvalConfig,
     semaphore: asyncio.Semaphore,
     progress: EvaluationProgress,
     pbar: Optional['tqdm'] = None,
     results_saver: Optional[ProgressiveResultsSaver] = None
-) -> List[EvalResult]:
-    """Evaluate a single scenario with all models."""
-    async with semaphore:
-        try:
-            # Load and validate scenario
-            scenario = load_scenario_from_dir(scenario_path, config.extra_items)
-            
-        except Exception as e:
-            await progress.update([], scenario_path, failed=True)
-            if pbar:
-                pbar.set_description(progress.get_summary())
-                pbar.update(1)
-            return []
-        
-        # Create grader instances from configs
-        graders = []
-        for grader_config in config.autograders:
-            graders.append(ModelBasedResponseGrader(grader_config))
-        
-        # Create evaluator
-        evaluator = ScenarioEvaluator(
-            eval=scenario,
-            runs_per_model=config.runs_per_model,
-            graders=graders
-        )
-        
-        scenario_results = []
-        
-        # Run each model with error handling
-        for model_config in config.models:
-            try:
-                result = await evaluator.run_eval(
-                    provider=model_config.provider,
-                    model_id=model_config.model_id,
-                    num_runs=config.runs_per_model
-                )
-                scenario_results.append(result)
-                
-                # Save successful result progressively if saver is provided
-                if results_saver:
-                    await results_saver.save_result(result, scenario_path)
-                    
-            except Exception as e:
-                # Log the error with full context
-                error_msg = f"Error evaluating {model_config.provider}/{model_config.model_id} on {scenario_path}: {str(e)}"
-                logger.error(error_msg)
-                logger.debug(f"Full traceback:\n{traceback.format_exc()}")
-                
-                # Create and save error result
-                if results_saver:
-                    error_result = create_error_result(
-                        model_config.provider,
-                        model_config.model_id,
-                        e,
-                        scenario_path
-                    )
-                    await results_saver.save_error(error_result)
-                
-                # Track error in progress
-                async with progress.lock:
-                    progress.error_count += 1
-                    progress.errors_by_model[f"{model_config.provider}/{model_config.model_id}"] += 1
-        
-        # Update progress
-        await progress.update(scenario_results, scenario_path)
+) -> Optional[EvalResult]:
+    """Evaluate a single (model, scenario) pair."""
+    try:
+        # Load and validate scenario
+        scenario = load_scenario_from_dir(scenario_path, config.extra_items)
+    except Exception as e:
+        logger.error(f"Error loading scenario {scenario_path}: {str(e)}")
         if pbar:
-            pbar.set_description(progress.get_summary())
             pbar.update(1)
-        
-        return scenario_results
+        return None
+    
+    # Create grader instances from configs
+    graders = []
+    for grader_config in config.autograders:
+        if isinstance(grader_config, ModelBasedResponseGraderConfig):
+            graders.append(ModelBasedResponseGrader(grader_config))
+        elif isinstance(grader_config, StringMatchGraderConfig):
+            graders.append(StringMatchGrader(grader_config))
+        else:
+            raise ValueError(f"Unknown grader config type: {type(grader_config)}")
+    
+    # Create evaluator
+    evaluator = ScenarioEvaluator(
+        eval=scenario,
+        runs_per_model=config.runs_per_model,
+        graders=graders
+    )
+    
+    # Evaluate this model on this scenario
+    result = await evaluate_model_on_scenario(
+        model_config, scenario_path, evaluator,
+        config, semaphore, progress, results_saver
+    )
+    
+    # Update progress bar
+    if pbar:
+        await progress.update([result] if result else [], scenario_path)
+        pbar.set_description(progress.get_summary())
+        pbar.update(1)
+    
+    return result
 
 
 async def run_evaluation(config: EvalConfig, max_concurrent: int = 5, output_path: Optional[Path] = None) -> List[EvalResult]:
@@ -355,7 +426,7 @@ async def run_evaluation(config: EvalConfig, max_concurrent: int = 5, output_pat
     
     Args:
         config: EvalConfig object with models, scenarios, and settings
-        max_concurrent: Maximum number of scenarios to evaluate concurrently
+        max_concurrent: Maximum number of model evaluations to run concurrently across all scenarios
         output_path: Optional path to save progressive results
         
     Returns:
@@ -364,9 +435,17 @@ async def run_evaluation(config: EvalConfig, max_concurrent: int = 5, output_pat
     # Scenarios is always a list of Path objects now (from glob expansion)
     scenario_paths = config.scenarios
     
+    # Create all (model, scenario) pairs
+    model_scenario_pairs = [
+        (model, scenario_path)
+        for scenario_path in scenario_paths
+        for model in config.models
+    ]
+    
     print(f"Found {len(scenario_paths)} scenarios to evaluate")
-    print(f"Running with max {max_concurrent} concurrent evaluations")
     print(f"Models: {[f'{m.provider}/{m.model_id}' for m in config.models]}")
+    print(f"Running with max {max_concurrent} concurrent model evaluations")
+    print(f"Total evaluations to run: {len(model_scenario_pairs)}")
     
     # Create progressive results saver if output path provided
     results_saver = None
@@ -379,32 +458,33 @@ async def run_evaluation(config: EvalConfig, max_concurrent: int = 5, output_pat
     # Create progress tracker
     progress = EvaluationProgress()
     
-    # Create semaphore to limit concurrent evaluations
+    # Create global semaphore to limit concurrent model evaluations
     semaphore = asyncio.Semaphore(max_concurrent)
     
-    # Create progress bar
-    pbar = tqdm(total=len(scenario_paths), desc="Starting evaluations...", 
-                unit="scenario", dynamic_ncols=True)
+    # Create progress bar for (model, scenario) pairs
+    pbar = tqdm(total=len(model_scenario_pairs), desc="Starting evaluations...", 
+                unit="eval", dynamic_ncols=True)
     
-    # Create tasks for all scenarios
+    # Create tasks for all (model, scenario) pairs
     tasks = [
-        evaluate_single_scenario(scenario_path, config, semaphore, progress, pbar, results_saver)
-        for scenario_path in scenario_paths
+        evaluate_model_scenario_pair(model_config, scenario_path, config, semaphore, progress, pbar, results_saver)
+        for model_config, scenario_path in model_scenario_pairs
     ]
     
     # Run all tasks concurrently
     try:
-        results_lists = await asyncio.gather(*tasks)
+        results = await asyncio.gather(*tasks)
     finally:
         pbar.close()
     
+    # Filter out None results
+    results = [r for r in results if r is not None]
+    
     # Print final summary
     print(f"\n\nEvaluation Complete!")
-    print(f"Scenarios evaluated: {progress.completed_scenarios}")
-    if progress.failed_scenarios > 0:
-        print(f"Scenarios failed: {progress.failed_scenarios}")
+    print(f"Total evaluations completed: {len(results)}/{len(model_scenario_pairs)}")
     if progress.error_count > 0:
-        print(f"Individual evaluation errors: {progress.error_count}")
+        print(f"Evaluation errors: {progress.error_count}")
     
     # Print average scores by model
     if progress.model_scores:
@@ -418,12 +498,7 @@ async def run_evaluation(config: EvalConfig, max_concurrent: int = 5, output_pat
                 else:
                     print(f"  {model}: {avg:.2f} (n={len(scores)})")
     
-    # Flatten results
-    all_results = []
-    for results in results_lists:
-        all_results.extend(results)
-    
-    return all_results
+    return results
 
 
 async def run_and_save_evaluation(config_path: Path, output_dir: Optional[Path] = None, max_concurrent: int = 5) -> List[EvalResult]:
@@ -496,7 +571,7 @@ def main():
         "--max-concurrent",
         type=int,
         default=5,
-        help="Maximum number of concurrent scenario evaluations (default: 5)"
+        help="Maximum number of concurrent model evaluations across all scenarios (default: 5)"
     )
     
     # Generate subcommand
@@ -521,6 +596,64 @@ def main():
         help="Maximum number of concurrent generation tasks (default: 5)"
     )
     
+    # View results subcommand
+    view_parser = subparsers.add_parser('view-results', help='Generate HTML viewer for evaluation results')
+    view_parser.add_argument(
+        "results",
+        type=Path,
+        help="Path to evaluation results JSON file"
+    )
+    view_parser.add_argument(
+        "-o", "--output",
+        type=Path,
+        default=Path("results_viewer.html"),
+        help="Output HTML file path (default: results_viewer.html)"
+    )
+    view_parser.add_argument(
+        "--scenario-filter",
+        type=str,
+        help="Glob pattern to filter scenarios (e.g., '*/problem_*')"
+    )
+    view_parser.add_argument(
+        "--model-filter",
+        type=str,
+        help="Glob pattern to filter models (e.g., 'gpt-4*')"
+    )
+    view_parser.add_argument(
+        "--include-errors",
+        action="store_true",
+        help="Include results with errors (default: exclude)"
+    )
+    view_parser.add_argument(
+        "--min-score",
+        type=float,
+        help="Minimum grade score to include"
+    )
+    view_parser.add_argument(
+        "--max-score",
+        type=float,
+        help="Maximum grade score to include"
+    )
+    view_parser.add_argument(
+        "--limit",
+        type=int,
+        help="Limit number of results per scenario"
+    )
+    
+    # View scenario subcommand
+    scenario_parser = subparsers.add_parser('view-scenario', help='Generate HTML viewer for a single scenario')
+    scenario_parser.add_argument(
+        "scenario",
+        type=Path,
+        help="Path to scenario directory"
+    )
+    scenario_parser.add_argument(
+        "-o", "--output",
+        type=Path,
+        default=Path("scenario_viewer.html"),
+        help="Output HTML file path (default: scenario_viewer.html)"
+    )
+    
     args = parser.parse_args()
     
     # Load environment variables from specified .env file
@@ -538,6 +671,26 @@ def main():
         # Run the async sweep generation
         from prefill_evals.generator import generate_sweep_from_config
         asyncio.run(generate_sweep_from_config(args.config, max_concurrent=args.max_concurrent))
+    elif args.command == 'view-results':
+        # Generate HTML viewer for results
+        from prefill_evals.results_viewer import generate_results_html
+        generate_results_html(
+            results_path=args.results,
+            output_path=args.output,
+            scenario_filter=args.scenario_filter,
+            model_filter=args.model_filter,
+            include_errors=args.include_errors,
+            min_score=args.min_score,
+            max_score=args.max_score,
+            limit=args.limit
+        )
+    elif args.command == 'view-scenario':
+        # Generate HTML viewer for a single scenario
+        from prefill_evals.results_viewer import generate_scenario_html
+        generate_scenario_html(
+            scenario_path=args.scenario,
+            output_path=args.output
+        )
     else:
         parser.print_help()
 

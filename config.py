@@ -4,7 +4,7 @@ Configuration data models and loading for conversation pre-fill eval generation.
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Any
+from typing import Dict, List, Optional, Tuple, Any, Union
 import yaml
 import json
 import glob
@@ -20,12 +20,24 @@ class ModelBasedResponseGraderConfig:
     grader: ModelConfig
     template_file: Path
     extra_items: Optional[List[str]] = None
+    max_concurrent: Optional[int] = None  # None means no limit
+
+@dataclass
+class StringMatchGraderConfig:
+    name: str
+    expected_strings: List[str]  # List of strings to match against
+    match_type: str = "exact"  # "exact", "contains", "fuzzy"
+    case_sensitive: bool = False
+    fuzzy_threshold: float = 0.8  # For fuzzy matching (0.0 to 1.0)
+    score_on_match: float = 1.0  # Score to assign when matched
+    score_on_no_match: float = 0.0  # Score to assign when not matched
+    match_all: bool = False  # If True, all expected_strings must match
 
 @dataclass
 class EvalConfig:
     models: List[ModelConfig]
     runs_per_model: int
-    autograders: List[ModelBasedResponseGraderConfig]
+    autograders: List[Union[ModelBasedResponseGraderConfig, StringMatchGraderConfig]]
     scenarios: List[Path]  # Always a list now, populated via glob expansion
     extra_items: Optional[List[str]] = None
 
@@ -84,16 +96,35 @@ def load_config(config_path: Path) -> EvalConfig:
     # Parse autograders
     autograders = []
     for grader_data in config_data.get('autograders', []):
-        grader_config = ModelConfig(
-            provider=grader_data['grader']['provider'],
-            model_id=grader_data['grader']['model_id']
-        )
-        autograders.append(ModelBasedResponseGraderConfig(
-            name=grader_data['name'],
-            grader=grader_config,
-            template_file=Path(grader_data['template_file']),
-            extra_items=grader_data.get('extra_items')
-        ))
+        grader_type = grader_data.get('type', 'model')  # Default to model-based for backward compatibility
+        
+        if grader_type == 'string_match':
+            # String match grader
+            autograders.append(StringMatchGraderConfig(
+                name=grader_data['name'],
+                expected_strings=grader_data['expected_strings'],
+                match_type=grader_data.get('match_type', 'exact'),
+                case_sensitive=grader_data.get('case_sensitive', False),
+                fuzzy_threshold=grader_data.get('fuzzy_threshold', 0.8),
+                score_on_match=grader_data.get('score_on_match', 1.0),
+                score_on_no_match=grader_data.get('score_on_no_match', 0.0),
+                match_all=grader_data.get('match_all', False)
+            ))
+        elif grader_type == 'model':
+            # Model-based grader
+            grader_config = ModelConfig(
+                provider=grader_data['grader']['provider'],
+                model_id=grader_data['grader']['model_id']
+            )
+            autograders.append(ModelBasedResponseGraderConfig(
+                name=grader_data['name'],
+                grader=grader_config,
+                template_file=Path(grader_data['template_file']),
+                extra_items=grader_data.get('extra_items'),
+                max_concurrent=grader_data.get('max_concurrent')
+            ))
+        else:
+            raise ValueError(f"Unknown autograder type: {grader_type}. Supported types: 'model', 'string_match'")
     
     # Parse scenarios - always treat as glob patterns (direct paths work too)
     scenarios_data = config_data.get('scenarios')

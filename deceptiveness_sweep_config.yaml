@@ -16,7 +16,7 @@ base:
   feedback_providers: []
   
   # Just one iteration per scenario
-  max_iterations: 1
+  max_iterations: 10
 
 sweeps:
   # Input directories to sweep over (3 levels deep to get to actual scenario folders)

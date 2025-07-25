@@ -13,16 +13,17 @@ import asyncio
 import time
 import logging
 from functools import wraps
+from datetime import datetime
 
 from dotenv import load_dotenv
 
-from anthropic import Anthropic
-from openai import OpenAI
+from anthropic import AsyncAnthropic
+from openai import AsyncOpenAI
 
 # Configure logging
 logger = logging.getLogger(__name__)
 
-def exponential_backoff_retry(max_retries: int = 10, base_delay: float = 1.0, max_delay: float = 60.0):
+def exponential_backoff_retry(max_retries: int = 5, base_delay: float = 1.0, max_delay: float = 60.0):
     """
     Decorator for retrying async functions with exponential backoff.
     
@@ -117,13 +118,13 @@ class ScenarioEvaluator:
         self.cache_dir = cache_dir
         self.graders = graders
 
-        self.anthropic_client = Anthropic()
-        self.openai_client = OpenAI()
+        self.anthropic_client = AsyncAnthropic()
+        self.openai_client = AsyncOpenAI()
 
     @exponential_backoff_retry(max_retries=5, base_delay=1.0, max_delay=60.0)
     async def _call_anthropic_api(self, params: dict) -> str:
         """Make a single API call to Anthropic with retry logic."""
-        response = self.anthropic_client.messages.create(**params)
+        response = await self.anthropic_client.messages.create(**params)
         
         # Extract only text content from the response
         response_text = ""
@@ -174,7 +175,7 @@ class ScenarioEvaluator:
     @exponential_backoff_retry(max_retries=5, base_delay=1.0, max_delay=60.0)
     async def _call_openai_api(self, params: dict) -> str:
         """Make a single API call to OpenAI with retry logic."""
-        response = self.openai_client.chat.completions.create(**params)
+        response = await self.openai_client.chat.completions.create(**params)
         
         # Extract only text content from the response
         response_text = response.choices[0].message.content or ""
@@ -247,5 +248,10 @@ class ScenarioEvaluator:
     
     async def run_eval(self, provider: str, model_id: str, num_runs: int = 1) -> EvalResult:
         responses = await self.run_model(provider, model_id, num_runs)
-        grades = await asyncio.gather(*[self.grade_response(response, self.eval) for response in responses])
+        
+        if self.graders:
+            grades = await asyncio.gather(*[self.grade_response(response, self.eval) for response in responses])
+        else:
+            grades = [[None] for _ in responses]
+            
         return EvalResult(provider, model_id, num_runs, responses, grades)
