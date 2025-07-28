@@ -342,8 +342,7 @@ async def evaluate_model_on_scenario(
         # Only hold semaphore for the actual API calls
         async with semaphore:
             result = await evaluator.run_eval(
-                provider=model_config.provider,
-                model_id=model_config.model_id,
+                model=model_config,
                 num_runs=config.runs_per_model
             )
         
