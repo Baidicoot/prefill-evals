@@ -55,6 +55,13 @@ class GenerationConfig:
     output_dir: Path
     max_iterations: int = 3
 
+def load_model_spec(model_data: Dict[str, Any]) -> ModelSpec:
+    return ModelSpec(
+        provider=model_data['provider'],
+        model_id=model_data['model_id'],
+        max_response_tokens=model_data.get('max_response_tokens')
+    )
+
 def load_config(config_path: Path) -> EvalConfig:
     """
     Load evaluation configuration from a YAML or JSON file.
@@ -84,10 +91,7 @@ def load_config(config_path: Path) -> EvalConfig:
     # Parse models
     models = []
     for model_data in config_data.get('models', []):
-        models.append(ModelSpec(
-            provider=model_data['provider'],
-            model_id=model_data['model_id']
-        ))
+        models.append(load_model_spec(model_data))
     
     # Parse autograders
     autograders = []
@@ -108,10 +112,7 @@ def load_config(config_path: Path) -> EvalConfig:
             ))
         elif grader_type == 'model':
             # Model-based grader
-            grader_config = ModelSpec(
-                provider=grader_data['grader']['provider'],
-                model_id=grader_data['grader']['model_id']
-            )
+            grader_config = load_model_spec(grader_data['grader'])
             autograders.append(ModelBasedResponseGraderConfig(
                 name=grader_data['name'],
                 grader=grader_config,
@@ -191,10 +192,7 @@ def create_generation_config(config_data: Dict[str, Any]) -> GenerationConfig:
     """
     # Parse generator model
     gen_model_data = config_data.get('generator_model', {})
-    generator_model = ModelSpec(
-        provider=gen_model_data['provider'],
-        model_id=gen_model_data['model_id']
-    )
+    generator_model = load_model_spec(gen_model_data)
     
     # Parse seed items
     seed_items = {}
@@ -204,10 +202,7 @@ def create_generation_config(config_data: Dict[str, Any]) -> GenerationConfig:
     # Parse feedback providers
     feedback_providers = []
     for feedback_data in config_data.get('feedback_providers', []):
-        feedback_model = ModelSpec(
-            provider=feedback_data['model']['provider'],
-            model_id=feedback_data['model']['model_id']
-        )
+        feedback_model = load_model_spec(feedback_data["model"])
         feedback_providers.append(ScenarioFeedbackConfig(
             name=feedback_data['name'],
             model=feedback_model,

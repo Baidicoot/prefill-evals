@@ -15,7 +15,7 @@ import logging
 import traceback
 
 # Set up logging
-logging.basicConfig(level=logging.ERROR, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.WARNING, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 try:
@@ -186,7 +186,7 @@ def truncate_model_name(model_name: str, max_length: int = 20) -> str:
     return "..." + model_name[-(max_length - 3):]
 
 
-def get_short_name(model_name: str) -> str:
+def get_short_name(model_name: str, max_length: int = 12) -> str:
     """Get a short, readable version of model names.
     
     - For claude-* models: extract middle parts (e.g. claude-3-7-sonnet-latest -> 3-7-sonnet)
@@ -219,7 +219,7 @@ def get_short_name(model_name: str) -> str:
                 checkpoint = last_part.replace("ckpt-", "")
                 suffix = f":{checkpoint}"
                 # Truncate name part to fit in 20 chars total
-                max_name_len = 20 - len(suffix)
+                max_name_len = max_length - len(suffix)
                 if len(name_part) > max_name_len:
                     name_part = name_part[:max_name_len]
                 return f"{name_part}{suffix}"
@@ -227,8 +227,8 @@ def get_short_name(model_name: str) -> str:
                 # Return second-last part (meaningful name when no checkpoint)
                 name_part = parts[-2]
                 # Truncate if too long
-                if len(name_part) > 20:
-                    return name_part[:20]
+                if len(name_part) > max_length:
+                    return name_part[:max_length]
                 return name_part
     
     # Default: truncate to first 16 characters
@@ -253,7 +253,7 @@ class EvaluationProgress:
             # Update scores
             for result in scenario_results:
                 self.completed_evaluations += 1
-                model_key = f"{result.provider}/{result.model_id}"
+                model_key = f"{result.model.provider}/{result.model.model_id}"
                 
                 if result.grades and any(result.grades):
                     # Calculate average score across all graders and runs
@@ -303,7 +303,7 @@ def save_eval_results(results: List[EvalResult], output_path: Path):
     print("="*80)
     
     for result in results:
-        print(f"\nModel: {result.provider}/{result.model_id}")
+        print(f"\nModel: {result.model.provider}/{result.model.model_id}")
         print(f"Number of runs: {result.num_runs}")
         
         # Print full responses

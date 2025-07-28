@@ -147,12 +147,14 @@ class ScenarioEvaluator:
         if self.eval.tools:
             tools = [tool.to_anthropic_format() for tool in self.eval.tools]
         
+        logger.debug(f"Running Anthropic model {model_id} with max response tokens {max_response_tokens}")
+
         for run_idx in range(num_runs):
             # Create the API call parameters
             params = {
                 "model": model_id,
                 "messages": messages,
-                "max_tokens": 4096 if max_response_tokens is None else max_response_tokens,
+                "max_completion_tokens": 4096 if max_response_tokens is None else max_response_tokens,
             }
             
             # Add system prompt if present
@@ -174,19 +176,18 @@ class ScenarioEvaluator:
         return responses
     
     @exponential_backoff_retry(max_retries=5, base_delay=1.0, max_delay=60.0)
-    async def _call_openai_api(self, params: dict) -> str:
+    async def _call_openai_api(self, params: dict) -> List[str]:
         """Make a single API call to OpenAI with retry logic."""
+
         response = await self.openai_client.chat.completions.create(**params)
         
         # Extract only text content from the response
-        response_text = response.choices[0].message.content or ""
+        response_texts = [choice.message.content or "" for choice in response.choices]
         
-        return response_text.strip()
+        return response_texts
 
     async def run_openai_model(self, model_id: str, num_runs: int = 1, max_response_tokens: Optional[int] = None) -> List[str]:
         """Run OpenAI model on the scenario eval."""
-        responses = []
-        
         # Convert messages to OpenAI format
         messages = to_openai_format(self.eval.messages)
         
@@ -198,26 +199,26 @@ class ScenarioEvaluator:
         tools = None
         if self.eval.tools:
             tools = [tool.to_openai_format() for tool in self.eval.tools]
-        
-        for run_idx in range(num_runs):
-            # Create the API call parameters
-            params = {
-                "model": model_id,
-                "messages": messages,
-                "max_tokens": 4096 if max_response_tokens is None else max_response_tokens,
-            }
-                
-            # Add tools if present
-            if tools:
-                params["tools"] = tools
+
+        params = {
+            "model": model_id,
+            "messages": messages,
+            "max_tokens": 4096 if max_response_tokens is None else max_response_tokens,
+            "n": num_runs,
+        }
             
-            try:
-                # Make the API call with retry logic
-                response_text = await self._call_openai_api(params)
-                responses.append(response_text)
-            except Exception as e:
-                logger.error(f"Failed to get response from {model_id} (run {run_idx + 1}/{num_runs}): {str(e)}")
-                raise
+        # Add tools if present
+        if tools:
+            params["tools"] = tools
+        
+        logger.debug(f"Running OpenAI model {model_id} with max response tokens {max_response_tokens}")
+
+        try:
+            # Make the API call with retry logic
+            responses = await self._call_openai_api(params)
+        except Exception as e:
+            logger.error(f"Failed to get response from {model_id}: {str(e)}")
+            raise
         
         return responses
     
