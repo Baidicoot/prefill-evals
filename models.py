@@ -11,6 +11,12 @@ from typing import Dict, List, Union, Optional, Any
 from dataclasses import dataclass
 import json
 
+@dataclass
+class ModelSpec:
+    provider: str
+    model_id: str
+    max_response_tokens: Optional[int] = None
+
 class AgentMessage(ABC):
     """Abstract base class for all message types in a transcript."""
     

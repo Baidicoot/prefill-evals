@@ -20,6 +20,8 @@ from dotenv import load_dotenv
 from anthropic import AsyncAnthropic
 from openai import AsyncOpenAI
 
+from prefill_evals.models import ModelSpec
+
 # Configure logging
 logger = logging.getLogger(__name__)
 
@@ -86,8 +88,7 @@ class EvalResult:
     """
     Result of running a scenario eval on a single model.
     """
-    provider: str
-    model_id: str
+    model: ModelSpec
     num_runs: int
     responses: List[str]
     grades: List[ResponseGrading]
@@ -134,7 +135,7 @@ class ScenarioEvaluator:
         
         return response_text.strip()
 
-    async def run_anthropic_model(self, model_id: str, num_runs: int = 1) -> List[str]:
+    async def run_anthropic_model(self, model_id: str, num_runs: int = 1, max_response_tokens: Optional[int] = None) -> List[str]:
         """Run Anthropic model on the scenario eval."""
         responses = []
         
@@ -151,7 +152,7 @@ class ScenarioEvaluator:
             params = {
                 "model": model_id,
                 "messages": messages,
-                "max_tokens": 4096,
+                "max_tokens": 4096 if max_response_tokens is None else max_response_tokens,
             }
             
             # Add system prompt if present
@@ -182,7 +183,7 @@ class ScenarioEvaluator:
         
         return response_text.strip()
 
-    async def run_openai_model(self, model_id: str, num_runs: int = 1) -> List[str]:
+    async def run_openai_model(self, model_id: str, num_runs: int = 1, max_response_tokens: Optional[int] = None) -> List[str]:
         """Run OpenAI model on the scenario eval."""
         responses = []
         
@@ -203,7 +204,7 @@ class ScenarioEvaluator:
             params = {
                 "model": model_id,
                 "messages": messages,
-                "max_tokens": 4096,
+                "max_tokens": 4096 if max_response_tokens is None else max_response_tokens,
             }
                 
             # Add tools if present
@@ -220,11 +221,11 @@ class ScenarioEvaluator:
         
         return responses
     
-    async def run_model(self, provider: str, model_id: str, num_runs: int = 1) -> List[str]:
+    async def run_model(self, provider: str, model_id: str, max_response_tokens: Optional[int] = None, num_runs: int = 1) -> List[str]:
         if provider == "anthropic":
-            return await self.run_anthropic_model(model_id, num_runs)
+            return await self.run_anthropic_model(model_id, num_runs, max_response_tokens)
         elif provider == "openai":
-            return await self.run_openai_model(model_id, num_runs)
+            return await self.run_openai_model(model_id, num_runs, max_response_tokens)
         else:
             raise ValueError(f"Unsupported model provider: {provider}")
     
@@ -246,12 +247,12 @@ class ScenarioEvaluator:
         
         return processed_grades
     
-    async def run_eval(self, provider: str, model_id: str, num_runs: int = 1) -> EvalResult:
-        responses = await self.run_model(provider, model_id, num_runs)
+    async def run_eval(self, model: ModelSpec, num_runs: int = 1) -> EvalResult:
+        responses = await self.run_model(model.provider, model.model_id, num_runs)
         
         if self.graders:
             grades = await asyncio.gather(*[self.grade_response(response, self.eval) for response in responses])
         else:
             grades = [[None] for _ in responses]
             
-        return EvalResult(provider, model_id, num_runs, responses, grades)
+        return EvalResult(model, num_runs, responses, grades)

@@ -42,9 +42,8 @@ except ImportError:
 from prefill_evals.config import load_config, EvalConfig, ModelBasedResponseGraderConfig, StringMatchGraderConfig
 from prefill_evals.parser import load_scenario_from_dir
 from prefill_evals.evaluator import ScenarioEvaluator, EvalResult, ResponseGrading
-from prefill_evals.models import ScenarioEval
+from prefill_evals.models import ScenarioEval, ModelSpec
 from prefill_evals.autograders import ModelBasedResponseGrader, StringMatchGrader
-
 
 def serialize_response_grading(grading: Optional[ResponseGrading]) -> Optional[Dict[str, Any]]:
     """Convert ResponseGrading to JSON-serializable dict."""
@@ -55,14 +54,24 @@ def serialize_response_grading(grading: Optional[ResponseGrading]) -> Optional[D
         "data": grading.data or {}
     }
 
+def serialize_model_spec(model: ModelSpec) -> Dict[str, Any]:
+    """Convert ModelSpec to JSON-serializable dict."""
+    data = {
+        "provider": model.provider,
+        "model_id": model.model_id
+    }
+
+    if model.max_response_tokens is not None:
+        data["max_response_tokens"] = model.max_response_tokens
+    
+    return data
 
 def serialize_eval_result(result: EvalResult, scenario_path: Path) -> Dict[str, Any]:
     """Convert EvalResult to JSON-serializable dict with scenario info."""
     return {
         "scenario_path": str(scenario_path),
-        "provider": result.provider,
-        "model_id": result.model_id,
-        "num_runs": result.num_runs,
+        "model": serialize_model_spec(result.model),
+        "num_runs": result.num_runs,   
         "responses": result.responses,
         "grades": [
             [serialize_response_grading(grade) for grade in response_grades]
@@ -72,12 +81,11 @@ def serialize_eval_result(result: EvalResult, scenario_path: Path) -> Dict[str, 
     }
 
 
-def create_error_result(provider: str, model_id: str, error: Exception, scenario_path: Path) -> Dict[str, Any]:
+def create_error_result(model: ModelSpec, error: Exception, scenario_path: Path) -> Dict[str, Any]:
     """Create an error result for failed evaluations."""
     return {
         "scenario_path": str(scenario_path),
-        "provider": provider,
-        "model_id": model_id,
+        "model": serialize_model_spec(model),
         "error": {
             "type": type(error).__name__,
             "message": str(error),
@@ -100,7 +108,7 @@ class ProgressiveResultsSaver:
                 "created_at": datetime.utcnow().isoformat() + "Z",
                 "updated_at": datetime.utcnow().isoformat() + "Z",
                 "config": {
-                    "models": [{"provider": m.provider, "model_id": m.model_id} for m in config.models] if config else [],
+                    "models": [serialize_model_spec(m) for m in config.models] if config else [],
                     "runs_per_model": config.runs_per_model if config else 1,
                     "num_scenarios": len(config.scenarios) if config else 0,
                     "autograders": [g.name for g in config.autograders] if config else []
@@ -354,8 +362,7 @@ async def evaluate_model_on_scenario(
         # Create and save error result
         if results_saver:
             error_result = create_error_result(
-                model_config.provider,
-                model_config.model_id,
+                model_config,
                 e,
                 scenario_path
             )

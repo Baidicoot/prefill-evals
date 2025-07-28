@@ -9,15 +9,12 @@ import yaml
 import json
 import glob
 
-@dataclass
-class ModelConfig:
-    provider: str
-    model_id: str
+from prefill_evals.models import ModelSpec
 
 @dataclass
 class ModelBasedResponseGraderConfig:
     name: str
-    grader: ModelConfig
+    grader: ModelSpec
     template_file: Path
     extra_items: Optional[List[str]] = None
     max_concurrent: Optional[int] = None  # None means no limit
@@ -35,23 +32,22 @@ class StringMatchGraderConfig:
 
 @dataclass
 class EvalConfig:
-    models: List[ModelConfig]
+    models: List[ModelSpec]
     runs_per_model: int
     autograders: List[Union[ModelBasedResponseGraderConfig, StringMatchGraderConfig]]
     scenarios: List[Path]  # Always a list now, populated via glob expansion
     extra_items: Optional[List[str]] = None
 
-
 @dataclass
 class ScenarioFeedbackConfig:
     name: str
-    model: ModelConfig
+    model: ModelSpec
     template_file: Path
 
 
 @dataclass
 class GenerationConfig:
-    generator_model: ModelConfig
+    generator_model: ModelSpec
     prompts_dir: Path  # Directory containing standard prompt files
     seed_items: Dict[str, Path]  # item_name -> file_path
     extra_items_to_generate: List[str]
@@ -88,7 +84,7 @@ def load_config(config_path: Path) -> EvalConfig:
     # Parse models
     models = []
     for model_data in config_data.get('models', []):
-        models.append(ModelConfig(
+        models.append(ModelSpec(
             provider=model_data['provider'],
             model_id=model_data['model_id']
         ))
@@ -112,7 +108,7 @@ def load_config(config_path: Path) -> EvalConfig:
             ))
         elif grader_type == 'model':
             # Model-based grader
-            grader_config = ModelConfig(
+            grader_config = ModelSpec(
                 provider=grader_data['grader']['provider'],
                 model_id=grader_data['grader']['model_id']
             )
@@ -195,7 +191,7 @@ def create_generation_config(config_data: Dict[str, Any]) -> GenerationConfig:
     """
     # Parse generator model
     gen_model_data = config_data.get('generator_model', {})
-    generator_model = ModelConfig(
+    generator_model = ModelSpec(
         provider=gen_model_data['provider'],
         model_id=gen_model_data['model_id']
     )
@@ -208,7 +204,7 @@ def create_generation_config(config_data: Dict[str, Any]) -> GenerationConfig:
     # Parse feedback providers
     feedback_providers = []
     for feedback_data in config_data.get('feedback_providers', []):
-        feedback_model = ModelConfig(
+        feedback_model = ModelSpec(
             provider=feedback_data['model']['provider'],
             model_id=feedback_data['model']['model_id']
         )
