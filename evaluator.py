@@ -222,7 +222,7 @@ class ScenarioEvaluator:
         
         return responses
     
-    async def run_model(self, provider: str, model_id: str, max_response_tokens: Optional[int] = None, num_runs: int = 1) -> List[str]:
+    async def run_model(self, provider: str, model_id: str, num_runs: int = 1, max_response_tokens: Optional[int] = None) -> List[str]:
         if provider == "anthropic":
             return await self.run_anthropic_model(model_id, num_runs, max_response_tokens)
         elif provider == "openai":
@@ -249,7 +249,12 @@ class ScenarioEvaluator:
         return processed_grades
     
     async def run_eval(self, model: ModelSpec, num_runs: int = 1) -> EvalResult:
-        responses = await self.run_model(model.provider, model.model_id, num_runs)
+        responses = await self.run_model(
+            provider=model.provider,
+            model_id=model.model_id,
+            num_runs=num_runs,
+            max_response_tokens=model.max_response_tokens
+        )
         
         if self.graders:
             grades = await asyncio.gather(*[self.grade_response(response, self.eval) for response in responses])
