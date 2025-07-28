@@ -86,8 +86,15 @@ class StringMatchGrader(ResponseGrader):
         self.config = config
         
         # Precompile regex patterns for contains matching if needed
-        if config.match_type == "contains" and not config.case_sensitive:
-            self.patterns = [re.compile(re.escape(s), re.IGNORECASE) for s in config.expected_strings]
+        if config.match_type in ["contains", "contains_word"] and not config.case_sensitive:
+            if config.match_type == "contains_word":
+                # Use word boundaries for word matching
+                self.patterns = [re.compile(r'\b' + re.escape(s) + r'\b', re.IGNORECASE) for s in config.expected_strings]
+            else:
+                self.patterns = [re.compile(re.escape(s), re.IGNORECASE) for s in config.expected_strings]
+        elif config.match_type == "contains_word" and config.case_sensitive:
+            # Case-sensitive word boundary patterns
+            self.patterns = [re.compile(r'\b' + re.escape(s) + r'\b') for s in config.expected_strings]
         else:
             self.patterns = None
     
@@ -109,6 +116,11 @@ class StringMatchGrader(ResponseGrader):
                     # Use precompiled patterns for case-insensitive contains
                     idx = self.config.expected_strings.index(expected)
                     matched = bool(self.patterns[idx].search(response))
+            
+            elif self.config.match_type == "contains_word":
+                # Use word boundary matching to match whole words only
+                idx = self.config.expected_strings.index(expected)
+                matched = bool(self.patterns[idx].search(response))
             
             elif self.config.match_type == "fuzzy":
                 # Use SequenceMatcher for fuzzy matching

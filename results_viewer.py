@@ -509,6 +509,32 @@ def generate_results_html(
     print(f"Results viewer saved to: {output_path}")
 
 
+def parse_transcript_messages(transcript: str) -> List[Tuple[str, str]]:
+    """Parse transcript into list of (tag_type, content) tuples."""
+    messages = []
+    import re
+    
+    # Regular expression to match any XML-like tag and its content
+    pattern = r'<(\w+(?::\w+)?|tool_result)>(.*?)</\1>'
+    matches = re.finditer(pattern, transcript, re.DOTALL)
+    
+    for match in matches:
+        tag_type = match.group(1)
+        content = match.group(2).strip()
+        
+        # Normalize tag types
+        if tag_type.startswith('tool_call'):
+            display_type = 'tool-call'
+        elif tag_type == 'tool_result':
+            display_type = 'tool-result'
+        else:
+            display_type = tag_type
+            
+        messages.append((display_type, content))
+    
+    return messages
+
+
 def render_scenario_html(scenario_path: Path) -> str:
     """Render a single scenario as HTML."""
     try:
@@ -517,16 +543,6 @@ def render_scenario_html(scenario_path: Path) -> str:
         
         # Get the transcript
         transcript = render_transcript(scenario)
-        
-        # Load any additional files
-        extra_files = {}
-        for file_path in scenario_path.iterdir():
-            if file_path.is_file() and file_path.name not in ['transcript.txt', '.DS_Store']:
-                try:
-                    content = file_path.read_text()
-                    extra_files[file_path.name] = content
-                except:
-                    pass
         
         # Generate HTML
         html_parts = ['''<!DOCTYPE html>
@@ -566,19 +582,60 @@ def render_scenario_html(scenario_path: Path) -> str:
         }
         
         .transcript {
-            background: #f8f8f8;
-            border: 1px solid #ddd;
-            border-radius: 5px;
-            padding: 20px;
             margin: 20px 0;
         }
         
         .transcript h2 {
             margin-top: 0;
             color: #555;
+            border-bottom: 2px solid #eee;
+            padding-bottom: 10px;
         }
         
-        .transcript pre {
+        .message-box {
+            background: #f8f8f8;
+            border: 1px solid #ddd;
+            border-radius: 8px;
+            padding: 15px;
+            margin: 10px 0;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+        }
+        
+        .message-box.user {
+            background: #e3f2fd;
+            border-color: #90caf9;
+        }
+        
+        .message-box.agent {
+            background: #f1f8e9;
+            border-color: #aed581;
+        }
+        
+        .message-box.system {
+            background: #fce4ec;
+            border-color: #f48fb1;
+        }
+        
+        .message-box.tool-call {
+            background: #fff3e0;
+            border-color: #ffb74d;
+        }
+        
+        .message-box.tool-result {
+            background: #f3e5f5;
+            border-color: #ce93d8;
+        }
+        
+        .message-label {
+            font-weight: 600;
+            color: #555;
+            margin-bottom: 8px;
+            text-transform: uppercase;
+            font-size: 12px;
+            letter-spacing: 0.5px;
+        }
+        
+        .message-content {
             white-space: pre-wrap;
             word-wrap: break-word;
             margin: 0;
@@ -587,33 +644,6 @@ def render_scenario_html(scenario_path: Path) -> str:
             line-height: 1.6;
         }
         
-        .extra-file {
-            margin: 20px 0;
-            border: 1px solid #ddd;
-            border-radius: 5px;
-            overflow: hidden;
-        }
-        
-        .extra-file-header {
-            background: #f0f0f0;
-            padding: 10px 15px;
-            font-weight: 600;
-            color: #555;
-            border-bottom: 1px solid #ddd;
-        }
-        
-        .extra-file-content {
-            padding: 15px;
-            background: #f8f8f8;
-        }
-        
-        .extra-file pre {
-            margin: 0;
-            white-space: pre-wrap;
-            word-wrap: break-word;
-            font-family: 'Courier New', monospace;
-            font-size: 13px;
-        }
         
         .metadata {
             background: #f0f0f0;
@@ -632,12 +662,6 @@ def render_scenario_html(scenario_path: Path) -> str:
             font-size: 14px;
         }
         
-        /* Syntax highlighting for transcript */
-        .user { color: #0066cc; }
-        .agent { color: #28a745; }
-        .system { color: #6f42c1; }
-        .tool-call { color: #dc3545; }
-        .tool-result { color: #fd7e14; }
         
         @media print {
             body { background: white; }
@@ -670,30 +694,27 @@ def render_scenario_html(scenario_path: Path) -> str:
         # Add transcript
         html_parts.append('<div class="transcript">')
         html_parts.append('<h2>Transcript</h2>')
-        html_parts.append('<pre>')
         
-        # Add some basic syntax highlighting
-        formatted_transcript = html.escape(transcript)
-        formatted_transcript = formatted_transcript.replace('&lt;user&gt;', '<span class="user">&lt;user&gt;</span>')
-        formatted_transcript = formatted_transcript.replace('&lt;/user&gt;', '<span class="user">&lt;/user&gt;</span>')
-        formatted_transcript = formatted_transcript.replace('&lt;agent&gt;', '<span class="agent">&lt;agent&gt;</span>')
-        formatted_transcript = formatted_transcript.replace('&lt;/agent&gt;', '<span class="agent">&lt;/agent&gt;</span>')
-        formatted_transcript = formatted_transcript.replace('&lt;system&gt;', '<span class="system">&lt;system&gt;</span>')
-        formatted_transcript = formatted_transcript.replace('&lt;/system&gt;', '<span class="system">&lt;/system&gt;</span>')
+        # Parse messages and render each in its own box
+        messages = parse_transcript_messages(transcript)
         
-        html_parts.append(formatted_transcript)
-        html_parts.append('</pre>')
+        for msg_type, content in messages:
+            # Create appropriate label for each message type
+            label_map = {
+                'user': 'User',
+                'agent': 'Agent',
+                'system': 'System',
+                'tool-call': 'Tool Call',
+                'tool-result': 'Tool Result'
+            }
+            label = label_map.get(msg_type, msg_type.title())
+            
+            html_parts.append(f'<div class="message-box {msg_type}">')
+            html_parts.append(f'<div class="message-label">{label}</div>')
+            html_parts.append(f'<div class="message-content">{html.escape(content)}</div>')
+            html_parts.append('</div>')
+        
         html_parts.append('</div>')
-        
-        # Add extra files
-        if extra_files:
-            for filename, content in sorted(extra_files.items()):
-                html_parts.append('<div class="extra-file">')
-                html_parts.append(f'<div class="extra-file-header">{html.escape(filename)}</div>')
-                html_parts.append('<div class="extra-file-content">')
-                html_parts.append(f'<pre>{html.escape(content)}</pre>')
-                html_parts.append('</div>')
-                html_parts.append('</div>')
         
         html_parts.append('''
     </div>
