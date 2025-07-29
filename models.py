@@ -24,6 +24,24 @@ class AgentMessage(ABC):
     def render(self, max_length: int = 100) -> str:
         """Render the message for display with truncation if needed."""
         pass
+    
+    @abstractmethod
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert message to JSON-serializable dictionary."""
+        pass
+    
+    @staticmethod
+    def from_dict(data: Dict[str, Any]) -> 'AgentMessage':
+        """Create AgentMessage from dictionary."""
+        msg_type = data.get('type')
+        if msg_type == 'text':
+            return TextMessage.from_dict(data)
+        elif msg_type == 'tool_call':
+            return ToolCall.from_dict(data)
+        elif msg_type == 'tool_result':
+            return ToolResult.from_dict(data)
+        else:
+            raise ValueError(f"Unknown message type: {msg_type}")
 
 
 @dataclass
@@ -38,6 +56,22 @@ class TextMessage(AgentMessage):
         if len(content) > max_length:
             content = content[:max_length] + "..."
         return f"TextMessage(role={repr(self.role)}, content={repr(content)})"
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to JSON-serializable dictionary."""
+        return {
+            'type': 'text',
+            'role': self.role,
+            'content': self.content
+        }
+    
+    @staticmethod
+    def from_dict(data: Dict[str, Any]) -> 'TextMessage':
+        """Create TextMessage from dictionary."""
+        return TextMessage(
+            role=data['role'],
+            content=data['content']
+        )
 
 
 @dataclass
@@ -63,6 +97,24 @@ class ToolCall(AgentMessage):
             params_parts.append(f"{k}={repr(v_str)}")
         args_preview = ', '.join(params_parts)
         return f"{self.name}({args_preview})"
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to JSON-serializable dictionary."""
+        return {
+            'type': 'tool_call',
+            'name': self.name,
+            'params': self.params,
+            'id': self.id
+        }
+    
+    @staticmethod
+    def from_dict(data: Dict[str, Any]) -> 'ToolCall':
+        """Create ToolCall from dictionary."""
+        return ToolCall(
+            name=data['name'],
+            params=data['params'],
+            id=data.get('id')
+        )
 
 
 @dataclass
@@ -77,6 +129,22 @@ class ToolResult(AgentMessage):
         if len(content) > max_length:
             content = content[:max_length] + "..."
         return f"ToolResult(content={repr(content)})"
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to JSON-serializable dictionary."""
+        return {
+            'type': 'tool_result',
+            'tool_call_id': self.tool_call_id,
+            'content': self.content
+        }
+    
+    @staticmethod
+    def from_dict(data: Dict[str, Any]) -> 'ToolResult':
+        """Create ToolResult from dictionary."""
+        return ToolResult(
+            tool_call_id=data['tool_call_id'],
+            content=data['content']
+        )
 
 
 def to_openai_format(messages: List[AgentMessage]) -> List[Dict[str, Any]]:
@@ -268,8 +336,110 @@ class ScenarioEval:
 
     # extra items for e.g. graders
     extra_items: Optional[Dict[str, str]] = None
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert ScenarioEval to JSON-serializable dictionary."""
+        result = {
+            'messages': [msg.to_dict() for msg in self.messages],
+            'tools': [{'name': tool.name, 'description': tool.description, 
+                      'parameters': [{'name': p.name, 'description': p.description, 
+                                    'type': p.type, 'optional': p.optional} 
+                                   for p in (tool.parameters or [])]} 
+                     for tool in self.tools],
+        }
+        if self.system is not None:
+            result['system'] = self.system
+        if self.extra_items is not None:
+            result['extra_items'] = self.extra_items
+        return result
+    
+    @staticmethod
+    def from_dict(data: Dict[str, Any]) -> 'ScenarioEval':
+        """Create ScenarioEval from dictionary."""
+        messages = [AgentMessage.from_dict(msg) for msg in data['messages']]
+        
+        tools = []
+        for tool_data in data.get('tools', []):
+            parameters = []
+            for param_data in tool_data.get('parameters', []):
+                parameters.append(ToolParameter(
+                    name=param_data['name'],
+                    description=param_data['description'],
+                    type=param_data['type'],
+                    optional=param_data['optional']
+                ))
+            tools.append(ToolDefinition(
+                name=tool_data['name'],
+                description=tool_data.get('description'),
+                parameters=parameters if parameters else None
+            ))
+        
+        return ScenarioEval(
+            messages=messages,
+            tools=tools,
+            system=data.get('system'),
+            extra_items=data.get('extra_items')
+        )
 
-def validate_scenario(scenario: ScenarioEval) -> List[str]:
+def serialize_messages(messages: List[AgentMessage]) -> List[Dict[str, Any]]:
+    """Convert a list of AgentMessage objects to JSON-serializable list."""
+    return [msg.to_dict() for msg in messages]
+
+
+def deserialize_messages(data: List[Dict[str, Any]]) -> List[AgentMessage]:
+    """Create a list of AgentMessage objects from JSON data."""
+    return [AgentMessage.from_dict(msg_data) for msg_data in data]
+
+
+def messages_to_text(messages: List[AgentMessage]) -> str:
+    """
+    Convert a list of AgentMessage objects to text transcript format.
+    
+    Format:
+    - TextMessage with role "user" -> "User: {content}"
+    - TextMessage with role "assistant" -> "Agent: {content}"
+    - TextMessage with role "system" -> "System: {content}"
+    - ToolCall -> "Agent: <agentml:function_calls>..."
+    - ToolResult -> "<agentml:tool_result>..."
+    """
+    parts = []
+    current_agent_content = []
+    
+    for msg in messages:
+        if isinstance(msg, TextMessage):
+            if msg.role == "user":
+                # Flush any pending agent content
+                if current_agent_content:
+                    parts.append(f"Agent: {''.join(current_agent_content)}")
+                    current_agent_content = []
+                parts.append(f"User: {msg.content}")
+            elif msg.role == "assistant":
+                current_agent_content.append(msg.content)
+            elif msg.role == "system":
+                # Flush any pending agent content
+                if current_agent_content:
+                    parts.append(f"Agent: {''.join(current_agent_content)}")
+                    current_agent_content = []
+                parts.append(f"System: {msg.content}")
+        elif isinstance(msg, ToolCall):
+            # Add tool call to agent content
+            tool_call_text = f"\n<agentml:function_calls>\n<agentml:invoke name=\"{msg.name}\">\n"
+            for param_name, param_value in msg.params.items():
+                tool_call_text += f"<agentml:parameter name=\"{param_name}\">{param_value}</agentml:parameter>\n"
+            tool_call_text += "</agentml:invoke>\n</agentml:function_calls>"
+            current_agent_content.append(tool_call_text)
+        elif isinstance(msg, ToolResult):
+            # Add tool result
+            current_agent_content.append(f"\n<agentml:tool_result>\n{msg.content}\n</agentml:tool_result>")
+    
+    # Flush any remaining agent content
+    if current_agent_content:
+        parts.append(f"Agent: {''.join(current_agent_content)}")
+    
+    return "\n\n".join(parts)
+
+
+def validate_scenario(scenario: ScenarioEval, require_user_ending: bool = False) -> List[str]:
     """
     Validate a list of AgentMessage objects for structural correctness.
     
@@ -277,11 +447,11 @@ def validate_scenario(scenario: ScenarioEval) -> List[str]:
     1. Message sequence follows user->agent alternation
     2. Tool calls have matching tool results
     3. Tool calls reference defined tools (if tools provided)
-    4. Transcript ends with a user message
+    4. Transcript ends with a user message (only if require_user_ending=True)
     
     Args:
-        messages: List of AgentMessage objects
-        tools: Optional list of tool definitions to validate against
+        scenario: ScenarioEval object to validate
+        require_user_ending: If True, requires transcript to end with user message (for generation)
         
     Returns:
         List of validation error messages (empty if valid)
@@ -410,8 +580,8 @@ def validate_scenario(scenario: ScenarioEval) -> List[str]:
         error += f"  Fix: Add <agentml:tool_result>...</agentml:tool_result> for each pending tool call"
         errors.append(error)
     
-    # Check that transcript ends with user message
-    if messages:
+    # Check that transcript ends with user message (only if required)
+    if require_user_ending and messages:
         last_msg = messages[-1]
         if not (isinstance(last_msg, TextMessage) and last_msg.role == 'user'):
             error = f"ERROR: Invalid transcript ending at {describe_position(len(messages)-1, messages)}\n"

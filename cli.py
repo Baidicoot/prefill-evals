@@ -39,11 +39,16 @@ except ImportError:
         def close(self):
             print()  # New line at the end
 
-from prefill_evals.config import load_config, EvalConfig, ModelBasedResponseGraderConfig, StringMatchGraderConfig
+from prefill_evals.config import load_config, EvalConfig, ModelBasedResponseGraderConfig, StringMatchGraderConfig, MultiturnEvaluatorConfig
 from prefill_evals.parser import load_scenario_from_dir
-from prefill_evals.evaluator import ScenarioEvaluator, EvalResult, ResponseGrading
-from prefill_evals.models import ScenarioEval, ModelSpec
+from prefill_evals.evaluator import ScenarioEvaluator, EvalResult, ResponseGrading, render_messages
+from prefill_evals.models import ScenarioEval, ModelSpec, AgentMessage, TextMessage
 from prefill_evals.autograders import ModelBasedResponseGrader, StringMatchGrader
+from prefill_evals.multiturn_evaluator import MultiturnEvaluator
+
+def serialize_agent_message(message: AgentMessage) -> Dict[str, Any]:
+    """Convert AgentMessage to JSON-serializable dict."""
+    return message.to_dict()
 
 def serialize_response_grading(grading: Optional[ResponseGrading]) -> Optional[Dict[str, Any]]:
     """Convert ResponseGrading to JSON-serializable dict."""
@@ -68,11 +73,20 @@ def serialize_model_spec(model: ModelSpec) -> Dict[str, Any]:
 
 def serialize_eval_result(result: EvalResult, scenario_path: Path) -> Dict[str, Any]:
     """Convert EvalResult to JSON-serializable dict with scenario info."""
+    # Serialize responses - each response is a list of messages
+    serialized_responses = []
+    for response_messages in result.responses:
+        serialized_messages = [serialize_agent_message(msg) for msg in response_messages]
+        serialized_responses.append({
+            "messages": serialized_messages,
+            "text": render_messages(response_messages)  # Include rendered text for backward compatibility
+        })
+    
     return {
         "scenario_path": str(scenario_path),
         "model": serialize_model_spec(result.model),
         "num_runs": result.num_runs,   
-        "responses": result.responses,
+        "responses": serialized_responses,
         "grades": [
             [serialize_response_grading(grade) for grade in response_grades]
             for response_grades in result.grades
@@ -404,12 +418,24 @@ async def evaluate_model_scenario_pair(
         else:
             raise ValueError(f"Unknown grader config type: {type(grader_config)}")
     
-    # Create evaluator
-    evaluator = ScenarioEvaluator(
-        eval=scenario,
-        runs_per_model=config.runs_per_model,
-        graders=graders
-    )
+    # Create appropriate evaluator based on config
+    if isinstance(config.evaluator, MultiturnEvaluatorConfig):
+        evaluator = MultiturnEvaluator(
+            eval=scenario,
+            runs_per_model=config.runs_per_model,
+            graders=graders,
+            user_simulator_model=config.evaluator.user_simulator_model,
+            max_turns=config.evaluator.max_turns,
+            temperature=config.evaluator.temperature,
+            evaluator_system_prompt=config.evaluator.evaluator_system_prompt
+        )
+    else:
+        # Default to ScenarioEvaluator
+        evaluator = ScenarioEvaluator(
+            eval=scenario,
+            runs_per_model=config.runs_per_model,
+            graders=graders
+        )
     
     # Evaluate this model on this scenario
     result = await evaluate_model_on_scenario(

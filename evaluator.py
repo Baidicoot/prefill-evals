@@ -3,7 +3,7 @@ Run models on scenario evals.
 """
 
 from typing import Dict, List, Tuple, Optional, Union, Any
-from prefill_evals.models import ScenarioEval, to_anthropic_format, to_openai_format
+from prefill_evals.models import ScenarioEval, to_anthropic_format, to_openai_format, AgentMessage, TextMessage
 
 from pathlib import Path
 
@@ -90,18 +90,17 @@ class EvalResult:
     """
     model: ModelSpec
     num_runs: int
-    responses: List[str]
+    responses: List[List[AgentMessage]]  # Changed from List[str] to List[List[AgentMessage]]
     grades: List[ResponseGrading]
 
-class ScenarioEvaluator:
-    """
-    Run models on scenario evals.
-    """
 
+class Evaluator(ABC):
+    """
+    Abstract base class for all evaluator types.
+    """
+    
     def __init__(
         self,
-        eval: ScenarioEval,
-        runs_per_model: int = 1,
         graders: List[ResponseGrader] = None,
         cache_dir: Optional[Path] = None,
         dotenv_path: Optional[Path] = None,
@@ -114,10 +113,62 @@ class ScenarioEvaluator:
         if cache_dir:
             raise NotImplementedError("Evaluation caching not yet implemented")
         
-        self.eval = eval
-        self.runs_per_model = runs_per_model
         self.cache_dir = cache_dir
         self.graders = graders
+    
+    @abstractmethod
+    async def run_eval(self, model: ModelSpec, num_runs: int = 1) -> EvalResult:
+        """
+        Run evaluation on a model and return results.
+        
+        Args:
+            model: Model specification to evaluate
+            num_runs: Number of runs to perform
+            
+        Returns:
+            EvalResult containing model responses and grades
+        """
+        pass
+
+
+def render_messages(messages: List[AgentMessage]) -> str:
+    """
+    Render a list of AgentMessage objects to a single string.
+    
+    Args:
+        messages: List of AgentMessage objects
+        
+    Returns:
+        Rendered string representation
+    """
+    parts = []
+    for msg in messages:
+        if isinstance(msg, TextMessage):
+            parts.append(msg.content)
+        else:
+            # For other message types, use their render method
+            parts.append(msg.render())
+    
+    return "\n".join(parts)
+
+
+class ScenarioEvaluator(Evaluator):
+    """
+    Run models on scenario evals.
+    """
+
+    def __init__(
+        self,
+        eval: ScenarioEval,
+        runs_per_model: int = 1,
+        graders: List[ResponseGrader] = None,
+        cache_dir: Optional[Path] = None,
+        dotenv_path: Optional[Path] = None,
+    ):
+        super().__init__(graders=graders, cache_dir=cache_dir, dotenv_path=dotenv_path)
+        
+        self.eval = eval
+        self.runs_per_model = runs_per_model
 
         self.anthropic_client = AsyncAnthropic()
         self.openai_client = AsyncOpenAI()
@@ -135,7 +186,7 @@ class ScenarioEvaluator:
         
         return response_text.strip()
 
-    async def run_anthropic_model(self, model_id: str, num_runs: int = 1, max_response_tokens: Optional[int] = None) -> List[str]:
+    async def run_anthropic_model(self, model_id: str, num_runs: int = 1, max_response_tokens: Optional[int] = None) -> List[List[AgentMessage]]:
         """Run Anthropic model on the scenario eval."""
         responses = []
         
@@ -168,7 +219,9 @@ class ScenarioEvaluator:
             try:
                 # Make the API call with retry logic
                 response_text = await self._call_anthropic_api(params)
-                responses.append(response_text)
+                # Wrap the string response in a TextMessage
+                response_messages = [TextMessage(role="assistant", content=response_text)]
+                responses.append(response_messages)
             except Exception as e:
                 logger.error(f"Failed to get response from {model_id} (run {run_idx + 1}/{num_runs}): {str(e)}")
                 raise
@@ -186,7 +239,7 @@ class ScenarioEvaluator:
         
         return response_texts
 
-    async def run_openai_model(self, model_id: str, num_runs: int = 1, max_response_tokens: Optional[int] = None) -> List[str]:
+    async def run_openai_model(self, model_id: str, num_runs: int = 1, max_response_tokens: Optional[int] = None) -> List[List[AgentMessage]]:
         """Run OpenAI model on the scenario eval."""
         # Convert messages to OpenAI format
         messages = to_openai_format(self.eval.messages)
@@ -215,14 +268,19 @@ class ScenarioEvaluator:
 
         try:
             # Make the API call with retry logic
-            responses = await self._call_openai_api(params)
+            response_texts = await self._call_openai_api(params)
+            # Convert each response to a list of messages
+            responses = []
+            for response_text in response_texts:
+                response_messages = [TextMessage(role="assistant", content=response_text)]
+                responses.append(response_messages)
         except Exception as e:
             logger.error(f"Failed to get response from {model_id}: {str(e)}")
             raise
         
         return responses
     
-    async def run_model(self, provider: str, model_id: str, num_runs: int = 1, max_response_tokens: Optional[int] = None) -> List[str]:
+    async def run_model(self, provider: str, model_id: str, num_runs: int = 1, max_response_tokens: Optional[int] = None) -> List[List[AgentMessage]]:
         if provider == "anthropic":
             return await self.run_anthropic_model(model_id, num_runs, max_response_tokens)
         elif provider == "openai":
@@ -230,10 +288,13 @@ class ScenarioEvaluator:
         else:
             raise ValueError(f"Unsupported model provider: {provider}")
     
-    async def grade_response(self, response: str, eval: ScenarioEval) -> List[ResponseGrading]:
+    async def grade_response(self, response_messages: List[AgentMessage], eval: ScenarioEval) -> List[ResponseGrading]:
+        # Render messages to string for grading
+        response_text = render_messages(response_messages)
+        
         # Use gather with return_exceptions=True to handle grading errors gracefully
         grades = await asyncio.gather(
-            *[grader.grade(response, eval) for grader in self.graders],
+            *[grader.grade(response_text, eval) for grader in self.graders],
             return_exceptions=True
         )
         
@@ -257,7 +318,7 @@ class ScenarioEvaluator:
         )
         
         if self.graders:
-            grades = await asyncio.gather(*[self.grade_response(response, self.eval) for response in responses])
+            grades = await asyncio.gather(*[self.grade_response(response_messages, self.eval) for response_messages in responses])
         else:
             grades = [[None] for _ in responses]
             

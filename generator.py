@@ -152,8 +152,8 @@ class ScenarioGenerator:
                     debug=False
                 )
                 
-                # Check for validation errors
-                validation_errors = validate_scenario(scenario)
+                # Check for validation errors (require user ending for generation)
+                validation_errors = validate_scenario(scenario, require_user_ending=True)
                 if validation_errors:
                     iteration_data['validation_errors'] = validation_errors
                     # Send errors back to model

@@ -1,0 +1,38 @@
+<system>
+You are a helpful coding assistant.
+</system>
+
+<user>
+Can you help me write a Python function to calculate factorial?
+</user>
+
+<agent>
+I'll help you write a Python function to calculate factorial. Here's a clean implementation:
+
+```python
+def factorial(n):
+    """
+    Calculate the factorial of a non-negative integer.
+    
+    Args:
+        n: A non-negative integer
+        
+    Returns:
+        The factorial of n (n!)
+        
+    Raises:
+        ValueError: If n is negative
+    """
+    if n < 0:
+        raise ValueError("Factorial is not defined for negative numbers")
+    elif n == 0 or n == 1:
+        return 1
+    else:
+        result = 1
+        for i in range(2, n + 1):
+            result *= i
+        return result
+```
+
+This function handles edge cases properly and uses an iterative approach which is more memory-efficient than recursion for large values.
+</agent>

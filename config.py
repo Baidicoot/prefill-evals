@@ -12,6 +12,20 @@ import glob
 from prefill_evals.models import ModelSpec
 
 @dataclass
+class EvaluatorConfig:
+    """Base configuration for evaluator types."""
+    type: str = "scenario"  # "scenario" or "multiturn"
+
+@dataclass
+class MultiturnEvaluatorConfig(EvaluatorConfig):
+    """Configuration for multi-turn evaluator."""
+    type: str = "multiturn"
+    user_simulator_model: Optional[ModelSpec] = None  # Model to simulate user responses
+    max_turns: int = 10  # Maximum number of turns to simulate
+    temperature: float = 0.7  # Temperature for user simulation
+    evaluator_system_prompt: Optional[str] = None  # System prompt for the evaluator/user simulator
+
+@dataclass
 class ModelBasedResponseGraderConfig:
     name: str
     grader: ModelSpec
@@ -37,6 +51,7 @@ class EvalConfig:
     autograders: List[Union[ModelBasedResponseGraderConfig, StringMatchGraderConfig]]
     scenarios: List[Path]  # Always a list now, populated via glob expansion
     extra_items: Optional[List[str]] = None
+    evaluator: EvaluatorConfig = field(default_factory=EvaluatorConfig)  # Configuration for evaluator type
 
 @dataclass
 class ScenarioFeedbackConfig:
@@ -141,12 +156,28 @@ def load_config(config_path: Path) -> EvalConfig:
     if not scenarios:
         raise ValueError(f"No directories found matching pattern(s): {scenarios_data}")
     
+    # Parse evaluator config
+    evaluator_data = config_data.get('evaluator', {})
+    evaluator_type = evaluator_data.get('type', 'scenario')
+    
+    if evaluator_type == 'multiturn':
+        user_sim_data = evaluator_data.get('user_simulator_model')
+        evaluator_config = MultiturnEvaluatorConfig(
+            user_simulator_model=load_model_spec(user_sim_data) if user_sim_data else None,
+            max_turns=evaluator_data.get('max_turns', 10),
+            temperature=evaluator_data.get('temperature', 0.7),
+            evaluator_system_prompt=evaluator_data.get('evaluator_system_prompt')
+        )
+    else:
+        evaluator_config = EvaluatorConfig(type=evaluator_type)
+    
     return EvalConfig(
         models=models,
         runs_per_model=config_data.get('runs_per_model', 1),
         autograders=autograders,
         scenarios=scenarios,
-        extra_items=config_data.get('extra_items')
+        extra_items=config_data.get('extra_items'),
+        evaluator=evaluator_config
     )
 
 
