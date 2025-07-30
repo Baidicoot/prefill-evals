@@ -84,41 +84,23 @@ def render_scenario_to_text(scenario: Dict) -> str:
     Returns:
         Formatted text representation
     """
-    parts = []
+    from prefill_evals.models import ScenarioEval
+    from prefill_evals.parser import render_transcript
     
-    # Add system message if present
-    if scenario.get("system"):
-        parts.append(f"System:\n{scenario['system']}")
+    # Convert dict to ScenarioEval if needed
+    if isinstance(scenario, dict):
+        # Create a ScenarioEval object from the dict
+        scenario_obj = ScenarioEval(
+            system=scenario.get("system"),
+            messages=scenario.get("messages", []),
+            tools=scenario.get("tools", []),
+            extra_items=scenario.get("extra_items", {})
+        )
+    else:
+        scenario_obj = scenario
     
-    # Process AgentMessage objects
-    messages = scenario.get("messages", [])
-    current_agent_parts = []
-    
-    for msg in messages:
-        if isinstance(msg, TextMessage):
-            if msg.role == "user":
-                # Flush any pending agent content
-                if current_agent_parts:
-                    parts.append(f"Agent:\n{''.join(current_agent_parts)}")
-                    current_agent_parts = []
-                parts.append(f"User:\n{msg.content}")
-            elif msg.role == "assistant":
-                current_agent_parts.append(msg.content)
-            elif msg.role == "system":
-                # Additional system messages
-                parts.append(f"System:\n{msg.content}")
-        elif isinstance(msg, ToolCall):
-            # Include tool calls in agent output
-            current_agent_parts.append(f"\n[Calling tool: {msg.name} with params: {msg.params}]")
-        elif isinstance(msg, ToolResult):
-            # Include tool results in agent output
-            current_agent_parts.append(f"\n[Tool result: {msg.content}]")
-    
-    # Flush any remaining agent content
-    if current_agent_parts:
-        parts.append(f"Agent:\n{''.join(current_agent_parts)}")
-    
-    return "\n\n".join(parts)
+    # Use the parser's render_transcript function
+    return render_transcript(scenario_obj)
 
 
 class ModelBasedGrader:

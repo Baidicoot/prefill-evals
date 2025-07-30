@@ -37,11 +37,11 @@ except ImportError:
         def close(self):
             print()  # New line at the end
 
-from prefill_evals.config import load_config, EvalConfig, ModelBasedResponseGraderConfig, StringMatchGraderConfig, MultiturnEvaluatorConfig
+from prefill_evals.config import load_config, EvalConfig, ModelBasedResponseGraderConfig, StringMatchGraderConfig, BinaryChoiceGraderConfig, MultiturnEvaluatorConfig
 from prefill_evals.parser import load_scenario_from_dir
 from prefill_evals.evaluator import ScenarioEvaluator, EvalResult, ResponseGrading, render_messages
 from prefill_evals.models import ScenarioEval, ModelSpec, AgentMessage, TextMessage
-from prefill_evals.autograders import ModelBasedResponseGrader, StringMatchGrader
+from prefill_evals.autograders import ModelBasedResponseGrader, StringMatchGrader, BinaryChoiceGrader
 from prefill_evals.multiturn_evaluator import MultiturnEvaluator
 from prefill_evals.results_saver import create_results_saver, create_error_result, BaseResultsSaver
 
@@ -232,6 +232,8 @@ async def evaluate_model_scenario_pair(
             graders.append(ModelBasedResponseGrader(grader_config))
         elif isinstance(grader_config, StringMatchGraderConfig):
             graders.append(StringMatchGrader(grader_config))
+        elif isinstance(grader_config, BinaryChoiceGraderConfig):
+            graders.append(BinaryChoiceGrader(grader_config))
         else:
             raise ValueError(f"Unknown grader config type: {type(grader_config)}")
     

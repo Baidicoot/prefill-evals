@@ -45,10 +45,23 @@ class StringMatchGraderConfig:
     match_all: bool = False  # If True, all expected_strings must match
 
 @dataclass
+class BinaryChoiceGraderConfig:
+    name: str
+    positive_strings: List[str]  # List of strings indicating positive choice
+    negative_strings: List[str]  # List of strings indicating negative choice
+    match_type: str = "exact"  # "exact", "contains", "contains_word", "fuzzy"
+    case_sensitive: bool = False
+    fuzzy_threshold: float = 0.8  # For fuzzy matching (0.0 to 1.0 similarity ratio)
+    score_positive: float = 1.0  # Score when only positive choice detected
+    score_negative: float = 0.0  # Score when only negative choice detected
+    score_both: Optional[float] = None  # Score when both detected (None = skip grading)
+    score_neither: Optional[float] = None  # Score when neither detected (None = skip grading)
+
+@dataclass
 class EvalConfig:
     models: List[ModelSpec]
     runs_per_model: int
-    autograders: List[Union[ModelBasedResponseGraderConfig, StringMatchGraderConfig]]
+    autograders: List[Union[ModelBasedResponseGraderConfig, StringMatchGraderConfig, BinaryChoiceGraderConfig]]
     scenarios: List[Path]  # Always a list now, populated via glob expansion
     extra_items: Optional[List[str]] = None
     evaluator: EvaluatorConfig = field(default_factory=EvaluatorConfig)  # Configuration for evaluator type
@@ -126,6 +139,20 @@ def load_config(config_path: Path) -> EvalConfig:
                 score_on_no_match=grader_data.get('score_on_no_match', 0.0),
                 match_all=grader_data.get('match_all', False)
             ))
+        elif grader_type == 'binary_choice':
+            # Binary choice grader
+            autograders.append(BinaryChoiceGraderConfig(
+                name=grader_data['name'],
+                positive_strings=grader_data['positive_strings'],
+                negative_strings=grader_data['negative_strings'],
+                match_type=grader_data.get('match_type', 'exact'),
+                case_sensitive=grader_data.get('case_sensitive', False),
+                fuzzy_threshold=grader_data.get('fuzzy_threshold', 0.8),
+                score_positive=grader_data.get('score_positive', 1.0),
+                score_negative=grader_data.get('score_negative', 0.0),
+                score_both=grader_data.get('score_both', None),
+                score_neither=grader_data.get('score_neither', None)
+            ))
         elif grader_type == 'model':
             # Model-based grader
             grader_config = load_model_spec(grader_data['grader'])
@@ -137,7 +164,7 @@ def load_config(config_path: Path) -> EvalConfig:
                 max_concurrent=grader_data.get('max_concurrent')
             ))
         else:
-            raise ValueError(f"Unknown autograder type: {grader_type}. Supported types: 'model', 'string_match'")
+            raise ValueError(f"Unknown autograder type: {grader_type}. Supported types: 'model', 'string_match', 'binary_choice'")
     
     # Parse scenarios - always treat as glob patterns (direct paths work too)
     scenarios_data = config_data.get('scenarios')

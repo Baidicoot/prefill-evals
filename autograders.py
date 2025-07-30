@@ -4,7 +4,7 @@ import re
 from difflib import SequenceMatcher
 
 from prefill_evals.evaluator import ResponseGrader, ResponseGrading, render_messages
-from prefill_evals.config import ModelBasedResponseGraderConfig, StringMatchGraderConfig
+from prefill_evals.config import ModelBasedResponseGraderConfig, StringMatchGraderConfig, BinaryChoiceGraderConfig
 from prefill_evals.models import ScenarioEval, AgentMessage
 from prefill_evals.parser import parse_xml_tags, render_transcript
 
@@ -167,6 +167,128 @@ class StringMatchGrader(ResponseGrader):
             ],
             "match_type": self.config.match_type,
             "match_all": self.config.match_all
+        }
+        
+        return ResponseGrading(score=score, data=data)
+
+
+class BinaryChoiceGrader(ResponseGrader):
+    """
+    Grade a model response based on binary choice detection.
+    Returns None if both positive and negative strings are detected, or if neither are detected.
+    """
+    
+    def __init__(self, config: BinaryChoiceGraderConfig):
+        self.name = config.name
+        self.config = config
+        
+        # Precompile regex patterns if needed
+        self._compile_patterns()
+    
+    def _compile_patterns(self):
+        """Compile regex patterns for efficient matching."""
+        if self.config.match_type in ["contains", "contains_word"] and not self.config.case_sensitive:
+            if self.config.match_type == "contains_word":
+                # Use word boundaries for word matching
+                self.positive_patterns = [re.compile(r'\b' + re.escape(s) + r'\b', re.IGNORECASE) for s in self.config.positive_strings]
+                self.negative_patterns = [re.compile(r'\b' + re.escape(s) + r'\b', re.IGNORECASE) for s in self.config.negative_strings]
+            else:
+                self.positive_patterns = [re.compile(re.escape(s), re.IGNORECASE) for s in self.config.positive_strings]
+                self.negative_patterns = [re.compile(re.escape(s), re.IGNORECASE) for s in self.config.negative_strings]
+        elif self.config.match_type == "contains_word" and self.config.case_sensitive:
+            # Case-sensitive word boundary patterns
+            self.positive_patterns = [re.compile(r'\b' + re.escape(s) + r'\b') for s in self.config.positive_strings]
+            self.negative_patterns = [re.compile(r'\b' + re.escape(s) + r'\b') for s in self.config.negative_strings]
+        else:
+            self.positive_patterns = None
+            self.negative_patterns = None
+    
+    def _check_match(self, response: str, expected: str, patterns: Optional[List] = None, idx: int = 0) -> bool:
+        """Check if expected string matches in response according to match_type."""
+        if self.config.match_type == "exact":
+            if self.config.case_sensitive:
+                return response == expected
+            else:
+                return response.lower() == expected.lower()
+        
+        elif self.config.match_type == "contains":
+            if self.config.case_sensitive:
+                return expected in response
+            else:
+                # Use precompiled patterns for case-insensitive contains
+                return bool(patterns[idx].search(response))
+        
+        elif self.config.match_type == "contains_word":
+            # Use word boundary matching to match whole words only
+            return bool(patterns[idx].search(response))
+        
+        elif self.config.match_type == "fuzzy":
+            # Use SequenceMatcher for fuzzy matching
+            if not self.config.case_sensitive:
+                response_cmp = response.lower()
+                expected_cmp = expected.lower()
+            else:
+                response_cmp = response
+                expected_cmp = expected
+            
+            similarity = SequenceMatcher(None, response_cmp, expected_cmp).ratio()
+            return similarity >= self.config.fuzzy_threshold
+        
+        else:
+            raise ValueError(f"Unknown match_type: {self.config.match_type}")
+    
+    async def grade(self, response: str, eval: ScenarioEval) -> Optional[ResponseGrading]:
+        """Grade response based on binary choice criteria."""
+        # Check for positive matches
+        positive_matches = []
+        for i, positive_str in enumerate(self.config.positive_strings):
+            matched = self._check_match(response, positive_str, self.positive_patterns, i)
+            positive_matches.append(matched)
+        
+        # Check for negative matches
+        negative_matches = []
+        for i, negative_str in enumerate(self.config.negative_strings):
+            matched = self._check_match(response, negative_str, self.negative_patterns, i)
+            negative_matches.append(matched)
+        
+        # Determine if we found any positive or negative matches
+        has_positive = any(positive_matches)
+        has_negative = any(negative_matches)
+        
+        # Determine score based on matches
+        if has_positive and has_negative:
+            # Both detected
+            if self.config.score_both is None:
+                return None  # Skip grading
+            score = self.config.score_both
+            choice = "both"
+        elif has_positive and not has_negative:
+            # Only positive detected
+            score = self.config.score_positive
+            choice = "positive"
+        elif has_negative and not has_positive:
+            # Only negative detected
+            score = self.config.score_negative
+            choice = "negative"
+        else:
+            # Neither detected
+            if self.config.score_neither is None:
+                return None  # Skip grading
+            score = self.config.score_neither
+            choice = "neither"
+        
+        # Include match details in data
+        data = {
+            "choice": choice,
+            "positive_matches": [
+                {"string": s, "matched": m} 
+                for s, m in zip(self.config.positive_strings, positive_matches)
+            ],
+            "negative_matches": [
+                {"string": s, "matched": m} 
+                for s, m in zip(self.config.negative_strings, negative_matches)
+            ],
+            "match_type": self.config.match_type
         }
         
         return ResponseGrading(score=score, data=data)
