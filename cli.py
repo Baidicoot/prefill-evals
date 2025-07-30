@@ -13,6 +13,9 @@ from datetime import datetime
 import os
 import logging
 import traceback
+import uuid
+import tempfile
+import time
 
 # Set up logging
 logging.basicConfig(level=logging.WARNING, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -69,6 +72,9 @@ def serialize_model_spec(model: ModelSpec) -> Dict[str, Any]:
     if model.max_response_tokens is not None:
         data["max_response_tokens"] = model.max_response_tokens
     
+    if model.alias is not None:
+        data["alias"] = model.alias
+    
     return data
 
 def serialize_eval_result(result: EvalResult, scenario_path: Path) -> Dict[str, Any]:
@@ -110,12 +116,24 @@ def create_error_result(model: ModelSpec, error: Exception, scenario_path: Path)
 
 
 class ProgressiveResultsSaver:
-    """Save evaluation results progressively as they complete."""
+    """Save evaluation results progressively as they complete with batched writes."""
     
-    def __init__(self, output_path: Path, config: Optional[EvalConfig] = None):
+    def __init__(self, output_path: Path, config: Optional[EvalConfig] = None, 
+                 batch_size: int = 10, flush_interval: float = 5.0):
         self.output_path = output_path
         self.output_path.parent.mkdir(parents=True, exist_ok=True)
         self.lock = asyncio.Lock()
+        self.batch_size = batch_size
+        self.flush_interval = flush_interval
+        
+        # Pending results buffer
+        self.pending_results = []
+        self.last_flush_time = time.time()
+        
+        # Background flush task
+        self.flush_task = None
+        self.should_stop = False
+        
         self.data = {
             "metadata": {
                 "version": "1.0",
@@ -145,52 +163,108 @@ class ProgressiveResultsSaver:
                         print(f"Converted {len(existing_data)} existing results to new format")
             except Exception as e:
                 print(f"Warning: Could not load existing results: {e}")
+        
+        # Start background flush task
+        self.flush_task = asyncio.create_task(self._background_flush())
+    
+    async def _background_flush(self):
+        """Background task that periodically flushes pending results to disk."""
+        while not self.should_stop:
+            try:
+                await asyncio.sleep(self.flush_interval)
+                await self._flush_if_needed()
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"Error in background flush: {e}")
+    
+    async def _flush_if_needed(self):
+        """Check if flush is needed based on batch size or time."""
+        async with self.lock:
+            current_time = time.time()
+            time_since_flush = current_time - self.last_flush_time
+            
+            if (len(self.pending_results) >= self.batch_size or 
+                (len(self.pending_results) > 0 and time_since_flush >= self.flush_interval)):
+                await self._flush_to_disk()
+    
+    async def _flush_to_disk(self):
+        """Flush pending results to disk. Must be called with lock held."""
+        if not self.pending_results:
+            return
+        
+        # Add pending results to data
+        self.data["results"].extend(self.pending_results)
+        self.data["metadata"]["updated_at"] = datetime.utcnow().isoformat() + "Z"
+        
+        # Generate unique temp file name
+        temp_dir = self.output_path.parent
+        temp_fd, temp_path = tempfile.mkstemp(suffix='.tmp', dir=temp_dir, text=True)
+        
+        try:
+            # Write to temp file
+            with os.fdopen(temp_fd, 'w') as f:
+                json.dump(self.data, f, indent=2)
+            
+            # Atomic rename
+            Path(temp_path).replace(self.output_path)
+            
+            # Clear pending results
+            self.pending_results = []
+            self.last_flush_time = time.time()
+            
+        except Exception as e:
+            # Clean up temp file on error
+            try:
+                os.unlink(temp_path)
+            except:
+                pass
+            raise e
     
     async def save_result(self, result: EvalResult, scenario_path: Path):
-        """Save a single evaluation result to the file."""
+        """Add a result to the pending buffer."""
         async with self.lock:
             serialized = serialize_eval_result(result, scenario_path)
-            self.data["results"].append(serialized)
-            self.data["metadata"]["updated_at"] = datetime.utcnow().isoformat() + "Z"
+            self.pending_results.append(serialized)
             
-            # Write the entire data structure atomically
-            temp_path = self.output_path.with_suffix('.tmp')
-            with open(temp_path, 'w') as f:
-                json.dump(self.data, f, indent=2)
-            
-            # Atomic rename
-            temp_path.replace(self.output_path)
+            # Check if we should flush
+            if len(self.pending_results) >= self.batch_size:
+                await self._flush_to_disk()
     
     async def save_error(self, error_result: Dict[str, Any]):
-        """Save an error result to the file."""
+        """Add an error result to the pending buffer."""
         async with self.lock:
-            self.data["results"].append(error_result)
-            self.data["metadata"]["updated_at"] = datetime.utcnow().isoformat() + "Z"
+            self.pending_results.append(error_result)
             
-            # Write the entire data structure atomically
-            temp_path = self.output_path.with_suffix('.tmp')
-            with open(temp_path, 'w') as f:
-                json.dump(self.data, f, indent=2)
-            
-            # Atomic rename
-            temp_path.replace(self.output_path)
+            # Check if we should flush
+            if len(self.pending_results) >= self.batch_size:
+                await self._flush_to_disk()
     
     async def save_batch(self, results_with_paths: List[Tuple[EvalResult, Path]]):
         """Save multiple results at once."""
         async with self.lock:
             for result, scenario_path in results_with_paths:
                 serialized = serialize_eval_result(result, scenario_path)
-                self.data["results"].append(serialized)
+                self.pending_results.append(serialized)
             
-            self.data["metadata"]["updated_at"] = datetime.utcnow().isoformat() + "Z"
-            
-            # Write the entire data structure atomically
-            temp_path = self.output_path.with_suffix('.tmp')
-            with open(temp_path, 'w') as f:
-                json.dump(self.data, f, indent=2)
-            
-            # Atomic rename
-            temp_path.replace(self.output_path)
+            # Always flush after batch save
+            await self._flush_to_disk()
+    
+    async def finalize(self):
+        """Ensure all pending results are written and clean up."""
+        self.should_stop = True
+        
+        # Cancel background task
+        if self.flush_task:
+            self.flush_task.cancel()
+            try:
+                await self.flush_task
+            except asyncio.CancelledError:
+                pass
+        
+        # Final flush
+        async with self.lock:
+            await self._flush_to_disk()
 
 
 def truncate_model_name(model_name: str, max_length: int = 20) -> str:
@@ -200,56 +274,6 @@ def truncate_model_name(model_name: str, max_length: int = 20) -> str:
     return "..." + model_name[-(max_length - 3):]
 
 
-def get_short_name(model_name: str, max_length: int = 12) -> str:
-    """Get a short, readable version of model names.
-    
-    - For claude-* models: extract middle parts (e.g. claude-3-7-sonnet-latest -> 3-7-sonnet)
-    - For OpenAI finetunes (ft:*): extract meaningful suffix (e.g. ft:...:name:id -> name or name:ckpt-step-N)
-    - Otherwise: truncate to first 16 characters
-    """
-    # Remove provider prefix if present (e.g. "openai/gpt-4" -> "gpt-4")
-    if "/" in model_name:
-        parts = model_name.split("/", 1)
-        if len(parts) == 2:
-            model_name = parts[1]
-    
-    # Handle Claude models
-    if model_name.startswith("claude-"):
-        parts = model_name.split("-")
-        if len(parts) > 2:
-            # Remove first (claude) and last (version/date) parts
-            return "-".join(parts[1:-1])
-    
-    # Handle OpenAI finetunes
-    elif model_name.startswith("ft:"):
-        parts = model_name.split(":")
-        if len(parts) >= 2:
-            # Check if last part looks like ckpt-step-N
-            last_part = parts[-1]
-            if last_part.startswith("ckpt-step-") and len(parts) >= 4:
-                # Get the meaningful name and checkpoint
-                name_part = parts[-3]
-                # Shorten ckpt-step-N to step-N
-                checkpoint = last_part.replace("ckpt-", "")
-                suffix = f":{checkpoint}"
-                # Truncate name part to fit in 20 chars total
-                max_name_len = max_length - len(suffix)
-                if len(name_part) > max_name_len:
-                    name_part = name_part[:max_name_len]
-                return f"{name_part}{suffix}"
-            elif len(parts) >= 3:
-                # Return second-last part (meaningful name when no checkpoint)
-                name_part = parts[-2]
-                # Truncate if too long
-                if len(name_part) > max_length:
-                    return name_part[:max_length]
-                return name_part
-    
-    # Default: truncate to first 16 characters
-    if len(model_name) > 16:
-        return model_name[:16]
-    return model_name
-
 
 class EvaluationProgress:
     """Track evaluation progress and statistics."""
@@ -257,7 +281,8 @@ class EvaluationProgress:
     def __init__(self):
         self.completed_evaluations = 0
         self.error_count = 0  # Track individual evaluation errors
-        self.model_scores = defaultdict(list)  # model_id -> list of average scores
+        self.model_scores = defaultdict(list)  # model_key -> list of average scores
+        self.model_specs = {}  # model_key -> ModelSpec object
         self.errors_by_model = defaultdict(int)  # Track errors per model
         self.lock = asyncio.Lock()
     
@@ -268,6 +293,9 @@ class EvaluationProgress:
             for result in scenario_results:
                 self.completed_evaluations += 1
                 model_key = f"{result.model.provider}/{result.model.model_id}"
+                
+                # Store the ModelSpec for later reference
+                self.model_specs[model_key] = result.model
                 
                 if result.grades and any(result.grades):
                     # Calculate average score across all graders and runs
@@ -291,13 +319,18 @@ class EvaluationProgress:
         # Add average scores
         if self.model_scores:
             avg_scores = []
-            for model, scores in sorted(self.model_scores.items()):
+            for model_key, scores in sorted(self.model_scores.items()):
                 if scores:
                     avg = sum(scores) / len(scores)
-                    # Get short model name for display
-                    display_name = get_short_name(model)
+                    # Get short model name for display using ModelSpec method
+                    model_spec = self.model_specs.get(model_key)
+                    if model_spec:
+                        display_name = model_spec.get_short_name()
+                    else:
+                        # Fallback if ModelSpec not found (shouldn't happen)
+                        display_name = model_key.split("/")[-1][:12]
                     # Add error count for this model if any
-                    errors = self.errors_by_model.get(model, 0)
+                    errors = self.errors_by_model.get(model_key, 0)
                     if errors > 0:
                         avg_scores.append(f"{display_name}: {avg:.1f} (⚠{errors})")
                     else:
@@ -317,7 +350,7 @@ def save_eval_results(results: List[EvalResult], output_path: Path):
     print("="*80)
     
     for result in results:
-        print(f"\nModel: {result.model.provider}/{result.model.model_id}")
+        print(f"\nModel: {result.model.provider}/{result.model.model_id} ({result.model.get_short_name()})")
         print(f"Number of runs: {result.num_runs}")
         
         # Print full responses
@@ -368,7 +401,7 @@ async def evaluate_model_on_scenario(
         
     except Exception as e:
         # Log the error with full context
-        error_msg = f"Error evaluating {model_config.provider}/{model_config.model_id} on {scenario_path}: {str(e)}"
+        error_msg = f"Error evaluating {model_config.provider}/{model_config.model_id} ({model_config.get_short_name()}) on {scenario_path}: {str(e)}"
         logger.error(error_msg)
         logger.debug(f"Full traceback:\n{traceback.format_exc()}")
         
@@ -384,7 +417,10 @@ async def evaluate_model_on_scenario(
         # Track error in progress
         async with progress.lock:
             progress.error_count += 1
-            progress.errors_by_model[f"{model_config.provider}/{model_config.model_id}"] += 1
+            model_key = f"{model_config.provider}/{model_config.model_id}"
+            progress.errors_by_model[model_key] += 1
+            # Store the ModelSpec for later reference
+            progress.model_specs[model_key] = model_config
         
         return None
 
@@ -475,7 +511,7 @@ async def run_evaluation(config: EvalConfig, max_concurrent: int = 5, output_pat
     ]
     
     print(f"Found {len(scenario_paths)} scenarios to evaluate")
-    print(f"Models: {[f'{m.provider}/{m.model_id}' for m in config.models]}")
+    print(f"Models: {[f'{m.provider}/{m.model_id} ({m.get_short_name()})' for m in config.models]}")
     print(f"Running with max {max_concurrent} concurrent model evaluations")
     print(f"Total evaluations to run: {len(model_scenario_pairs)}")
     
@@ -511,6 +547,11 @@ async def run_evaluation(config: EvalConfig, max_concurrent: int = 5, output_pat
     
     # Filter out None results
     results = [r for r in results if r is not None]
+    
+    # Finalize results saver if it exists
+    if results_saver:
+        await results_saver.finalize()
+        print(f"\nAll results saved to: {output_path}")
     
     # Print final summary
     print(f"\n\nEvaluation Complete!")

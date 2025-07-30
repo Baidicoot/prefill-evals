@@ -1,0 +1,3 @@
+[submodule "external/auto-auditors"]
+	path = external/auto-auditors
+	url = https://github.com/Christine8888/auto-auditors.git

@@ -74,7 +74,8 @@ def load_model_spec(model_data: Dict[str, Any]) -> ModelSpec:
     return ModelSpec(
         provider=model_data['provider'],
         model_id=model_data['model_id'],
-        max_response_tokens=model_data.get('max_response_tokens')
+        max_response_tokens=model_data.get('max_response_tokens'),
+        alias=model_data.get('alias')
     )
 
 def load_config(config_path: Path) -> EvalConfig:

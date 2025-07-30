@@ -16,6 +16,65 @@ class ModelSpec:
     provider: str
     model_id: str
     max_response_tokens: Optional[int] = None
+    alias: Optional[str] = None
+    
+    def get_short_name(self, max_length: int = 12) -> str:
+        """Get a short, readable version of model names.
+        
+        Returns alias if set, otherwise:
+        - For claude-* models: extract middle parts (e.g. claude-3-7-sonnet-latest -> 3-7-sonnet)
+        - For OpenAI finetunes (ft:*): extract meaningful suffix (e.g. ft:...:name:id -> name or name:ckpt-step-N)
+        - Otherwise: truncate to first 16 characters
+        """
+        # If alias is set, use it
+        if self.alias:
+            return self.alias
+            
+        # Otherwise use the shortening logic
+        model_name = f"{self.provider}/{self.model_id}"
+        
+        # Remove provider prefix if present (e.g. "openai/gpt-4" -> "gpt-4")
+        if "/" in model_name:
+            parts = model_name.split("/", 1)
+            if len(parts) == 2:
+                model_name = parts[1]
+        
+        # Handle Claude models
+        if model_name.startswith("claude-"):
+            parts = model_name.split("-")
+            if len(parts) > 2:
+                # Remove first (claude) and last (version/date) parts
+                return "-".join(parts[1:-1])
+        
+        # Handle OpenAI finetunes
+        elif model_name.startswith("ft:"):
+            parts = model_name.split(":")
+            if len(parts) >= 2:
+                # Check if last part looks like ckpt-step-N
+                last_part = parts[-1]
+                if last_part.startswith("ckpt-step-") and len(parts) >= 4:
+                    # Get the meaningful name and checkpoint
+                    name_part = parts[-3]
+                    # Shorten ckpt-step-N to step-N
+                    checkpoint = last_part.replace("ckpt-", "")
+                    suffix = f":{checkpoint}"
+                    # Truncate name part to fit in max_length chars total
+                    max_name_len = max_length - len(suffix)
+                    if len(name_part) > max_name_len:
+                        name_part = name_part[:max_name_len]
+                    return f"{name_part}{suffix}"
+                elif len(parts) >= 3:
+                    # Return second-last part (meaningful name when no checkpoint)
+                    name_part = parts[-2]
+                    # Truncate if too long
+                    if len(name_part) > max_length:
+                        return name_part[:max_length]
+                    return name_part
+        
+        # Default: truncate to first 16 characters
+        if len(model_name) > 16:
+            return model_name[:16]
+        return model_name
 
 class AgentMessage(ABC):
     """Abstract base class for all message types in a transcript."""
