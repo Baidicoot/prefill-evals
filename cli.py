@@ -171,9 +171,12 @@ async def evaluate_model_on_scenario(
                 num_runs=config.runs_per_model
             )
         
+        # Set scenario path on the result
+        result.scenario_path = str(scenario_path)
+        
         # Save successful result progressively if saver is provided
         if results_saver:
-            await results_saver.save_result(result, scenario_path)
+            await results_saver.save_result(result)
         
         return result
         

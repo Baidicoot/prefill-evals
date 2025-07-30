@@ -13,12 +13,12 @@ import tempfile
 import time
 import traceback
 from abc import ABC, abstractmethod
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Any
+from typing import Dict, List, Optional, Tuple, Any, Union
 
 from prefill_evals.models import AgentMessage, ModelSpec
-from prefill_evals.evaluator import EvalResult, ResponseGrading
+from prefill_evals.evaluator import EvalResult, ResponseGrading, EvalError
 from prefill_evals.config import EvalConfig
 
 
@@ -60,8 +60,8 @@ def serialize_model_spec(model: ModelSpec) -> Dict[str, Any]:
     return data
 
 
-def serialize_eval_result(result: EvalResult, scenario_path: Path) -> Dict[str, Any]:
-    """Convert EvalResult to JSON-serializable dict with scenario info."""
+def serialize_eval_result(result: EvalResult) -> Dict[str, Any]:
+    """Convert EvalResult to JSON-serializable dict."""
     # Serialize responses - each response is a list of messages
     serialized_responses = []
     for response_messages in result.responses:
@@ -72,7 +72,7 @@ def serialize_eval_result(result: EvalResult, scenario_path: Path) -> Dict[str, 
         })
     
     return {
-        "scenario_path": str(scenario_path),
+        "scenario_path": result.scenario_path,
         "model": serialize_model_spec(result.model),
         "num_runs": result.num_runs,   
         "responses": serialized_responses,
@@ -80,22 +80,34 @@ def serialize_eval_result(result: EvalResult, scenario_path: Path) -> Dict[str, 
             [serialize_response_grading(grade) for grade in response_grades]
             for response_grades in result.grades
         ],
-        "timestamp": datetime.utcnow().isoformat() + "Z"
+        "timestamp": result.timestamp
     }
 
 
-def create_error_result(model: ModelSpec, error: Exception, scenario_path: Path) -> Dict[str, Any]:
-    """Create an error result entry."""
+def serialize_error(error: EvalError) -> Dict[str, Any]:
+    """Convert EvalError to JSON-serializable dict."""
     return {
-        "scenario_path": str(scenario_path),
-        "model": serialize_model_spec(model),
+        "scenario_path": error.scenario_path,
+        "model": serialize_model_spec(error.model),
         "error": {
-            "type": type(error).__name__,
-            "message": str(error),
-            "traceback": traceback.format_exc()
+            "type": error.error_type,
+            "message": error.error_message,
+            "traceback": error.traceback
         },
-        "timestamp": datetime.utcnow().isoformat() + "Z"
+        "timestamp": error.timestamp
     }
+
+
+def create_error_result(model: ModelSpec, error: Exception, scenario_path: Path) -> EvalError:
+    """Create an error result entry."""
+    return EvalError(
+        model=model,
+        scenario_path=str(scenario_path),
+        error_type=type(error).__name__,
+        error_message=str(error),
+        traceback=traceback.format_exc(),
+        timestamp=datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
+    )
 
 
 # =============================================================================
@@ -158,28 +170,29 @@ class BaseResultsSaver(ABC):
         """Flush pending results to disk. Must be called with lock held."""
         pass
     
-    async def save_result(self, result: EvalResult, scenario_path: Path):
+    async def save_result(self, result: EvalResult):
         """Save a single evaluation result."""
         async with self.lock:
-            serialized = serialize_eval_result(result, scenario_path)
+            serialized = serialize_eval_result(result)
             self.pending_results.append(serialized)
             
             if len(self.pending_results) >= self.batch_size:
                 await self._flush_to_disk()
     
-    async def save_error(self, error_result: Dict[str, Any]):
+    async def save_error(self, error_result: EvalError):
         """Save an error result."""
         async with self.lock:
-            self.pending_results.append(error_result)
+            serialized = serialize_error(error_result)
+            self.pending_results.append(serialized)
             
             if len(self.pending_results) >= self.batch_size:
                 await self._flush_to_disk()
     
-    async def save_batch(self, results_with_paths: List[Tuple[EvalResult, Path]]):
+    async def save_batch(self, results: List[EvalResult]):
         """Save multiple results at once."""
         async with self.lock:
-            for result, scenario_path in results_with_paths:
-                serialized = serialize_eval_result(result, scenario_path)
+            for result in results:
+                serialized = serialize_eval_result(result)
                 self.pending_results.append(serialized)
             
             # Always flush after batch save
@@ -217,8 +230,8 @@ class JSONResultsSaver(BaseResultsSaver):
         self.data = {
             "metadata": {
                 "version": "1.0",
-                "created_at": datetime.utcnow().isoformat() + "Z",
-                "updated_at": datetime.utcnow().isoformat() + "Z",
+                "created_at": datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z'),
+                "updated_at": datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z'),
                 "config": self._serialize_config(config) if config else {}
             },
             "results": []
@@ -259,7 +272,7 @@ class JSONResultsSaver(BaseResultsSaver):
         
         # Add pending results to data
         self.data["results"].extend(self.pending_results)
-        self.data["metadata"]["updated_at"] = datetime.utcnow().isoformat() + "Z"
+        self.data["metadata"]["updated_at"] = datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
         
         # Generate unique temp file
         temp_dir = self.output_path.parent
@@ -349,3 +362,118 @@ def create_results_saver(output_path: Path, config: Optional[EvalConfig] = None,
         return JSONLResultsSaver(output_path, config, **kwargs)
     else:
         raise ValueError(f"Unsupported output format: {format}. Choose 'json' or 'jsonl'.")
+
+
+# =============================================================================
+# Loading Utilities
+# =============================================================================
+
+def deserialize_model_spec(data: Dict[str, Any]) -> ModelSpec:
+    """Convert dict to ModelSpec."""
+    from prefill_evals.config import load_model_spec
+    return load_model_spec(data)
+
+
+def deserialize_response_grading(data: Optional[Dict[str, Any]]) -> Optional[ResponseGrading]:
+    """Convert dict to ResponseGrading."""
+    if data is None:
+        return None
+    return ResponseGrading(
+        score=data["score"],
+        data=data.get("data", {})
+    )
+
+
+def deserialize_agent_message(data: Dict[str, Any]) -> AgentMessage:
+    """Convert dict to AgentMessage."""
+    return AgentMessage.from_dict(data)
+
+
+def deserialize_eval_result(data: Dict[str, Any]) -> EvalResult:
+    """Convert dict to EvalResult."""
+    # Deserialize model
+    model = deserialize_model_spec(data["model"])
+    
+    # Deserialize responses
+    responses = []
+    for response_data in data["responses"]:
+        messages = [deserialize_agent_message(msg) for msg in response_data["messages"]]
+        responses.append(messages)
+    
+    # Deserialize grades
+    grades = []
+    for grade_list in data["grades"]:
+        response_grades = [deserialize_response_grading(g) for g in grade_list]
+        grades.append(response_grades)
+    
+    return EvalResult(
+        model=model,
+        num_runs=data["num_runs"],
+        responses=responses,
+        grades=grades,
+        scenario_path=data.get("scenario_path"),
+        timestamp=data.get("timestamp")
+    )
+
+
+def deserialize_error(data: Dict[str, Any]) -> EvalError:
+    """Convert dict to EvalError."""
+    return EvalError(
+        model=deserialize_model_spec(data["model"]),
+        scenario_path=data["scenario_path"],
+        error_type=data["error"]["type"],
+        error_message=data["error"]["message"],
+        traceback=data["error"]["traceback"],
+        timestamp=data["timestamp"]
+    )
+
+
+def load_results(file_path: Path) -> List[Union[EvalResult, EvalError]]:
+    """Load evaluation results from JSON or JSONL file.
+    
+    Args:
+        file_path: Path to results file
+        
+    Returns:
+        List of EvalResult or EvalError objects
+        
+    Raises:
+        ValueError: If file format is not supported
+    """
+    if not file_path.exists():
+        raise ValueError(f"File does not exist: {file_path}")
+    
+    results = []
+    
+    if file_path.suffix == '.jsonl':
+        # Load JSONL format
+        with open(file_path, 'r') as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                data = json.loads(line)
+                if 'error' in data:
+                    results.append(deserialize_error(data))
+                else:
+                    results.append(deserialize_eval_result(data))
+    elif file_path.suffix == '.json':
+        # Load JSON format
+        with open(file_path, 'r') as f:
+            data = json.load(f)
+        
+        # Handle both old (list) and new (dict with metadata) formats
+        if isinstance(data, list):
+            items = data
+        else:
+            items = data.get('results', [])
+        
+        for item in items:
+            if 'error' in item:
+                results.append(deserialize_error(item))
+            else:
+                results.append(deserialize_eval_result(item))
+    else:
+        raise ValueError(f"Unsupported file format: {file_path.suffix}")
+    
+    return results

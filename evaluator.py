@@ -13,7 +13,7 @@ import asyncio
 import time
 import logging
 from functools import wraps
-from datetime import datetime
+from datetime import datetime, timezone
 
 from anthropic import AsyncAnthropic
 from openai import AsyncOpenAI
@@ -116,6 +116,19 @@ class EvalResult:
     num_runs: int
     responses: List[List[AgentMessage]]  # Changed from List[str] to List[List[AgentMessage]]
     grades: List[ResponseGrading]
+    scenario_path: Optional[str] = None
+    timestamp: Optional[str] = None
+
+
+@dataclass
+class EvalError:
+    """Error result from evaluation."""
+    model: ModelSpec
+    scenario_path: str
+    error_type: str
+    error_message: str
+    traceback: str
+    timestamp: str
 
 
 class Evaluator(ABC):
@@ -342,4 +355,10 @@ class ScenarioEvaluator(Evaluator):
         else:
             grades = [[None] for _ in responses]
             
-        return EvalResult(model, num_runs, responses, grades)
+        return EvalResult(
+            model=model,
+            num_runs=num_runs,
+            responses=responses,
+            grades=grades,
+            timestamp=datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
+        )
