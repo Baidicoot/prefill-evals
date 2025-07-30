@@ -15,8 +15,6 @@ import logging
 from functools import wraps
 from datetime import datetime
 
-from dotenv import load_dotenv
-
 from anthropic import AsyncAnthropic
 from openai import AsyncOpenAI
 
@@ -24,15 +22,35 @@ from prefill_evals.models import ModelSpec
 
 # Configure logging
 logger = logging.getLogger(__name__)
+import random
 
-def exponential_backoff_retry(max_retries: int = 5, base_delay: float = 1.0, max_delay: float = 60.0):
+# Global API client instances - shared across all evaluators
+_anthropic_client = None
+_openai_client = None
+
+def get_anthropic_client() -> AsyncAnthropic:
+    """Get or create the global Anthropic client instance."""
+    global _anthropic_client
+    if _anthropic_client is None:
+        _anthropic_client = AsyncAnthropic()
+    return _anthropic_client
+
+def get_openai_client() -> AsyncOpenAI:
+    """Get or create the global OpenAI client instance."""
+    global _openai_client
+    if _openai_client is None:
+        _openai_client = AsyncOpenAI()
+    return _openai_client
+
+def exponential_backoff_retry(max_retries: int = 5, base_delay: float = 1.0, max_delay: float = 60.0, jitter: bool = True):
     """
-    Decorator for retrying async functions with exponential backoff.
+    Decorator for retrying async functions with exponential backoff and optional jitter.
     
     Args:
         max_retries: Maximum number of retry attempts
         base_delay: Initial delay between retries in seconds
         max_delay: Maximum delay between retries in seconds
+        jitter: Whether to add random jitter to delay times
     """
     def decorator(func):
         @wraps(func)
@@ -51,6 +69,12 @@ def exponential_backoff_retry(max_retries: int = 5, base_delay: float = 1.0, max
                     
                     # Calculate delay with exponential backoff
                     delay = min(base_delay * (2 ** attempt), max_delay)
+                    
+                    # Add random jitter to avoid thundering herd
+                    if jitter:
+                        jitter_factor = random.uniform(0.75, 1.25)
+                        delay *= jitter_factor
+                        delay = min(delay, max_delay)  # Ensure we don't exceed max_delay after jitter
                     
                     logger.warning(
                         f"Attempt {attempt + 1} failed for {func.__name__}: {str(e)}. "
@@ -105,11 +129,9 @@ class Evaluator(ABC):
         cache_dir: Optional[Path] = None,
         dotenv_path: Optional[Path] = None,
     ):
-        if dotenv_path:
-            load_dotenv(dotenv_path)
-        else:
-            load_dotenv()
-
+        # Note: load_dotenv should be called once at CLI startup, not here
+        # Keeping dotenv_path parameter for backward compatibility
+        
         if cache_dir:
             raise NotImplementedError("Evaluation caching not yet implemented")
         
@@ -170,13 +192,11 @@ class ScenarioEvaluator(Evaluator):
         self.eval = eval
         self.runs_per_model = runs_per_model
 
-        self.anthropic_client = AsyncAnthropic()
-        self.openai_client = AsyncOpenAI()
-
     @exponential_backoff_retry(max_retries=5, base_delay=1.0, max_delay=60.0)
     async def _call_anthropic_api(self, params: dict) -> str:
         """Make a single API call to Anthropic with retry logic."""
-        response = await self.anthropic_client.messages.create(**params)
+        client = get_anthropic_client()
+        response = await client.messages.create(**params)
         
         # Extract only text content from the response
         response_text = ""
@@ -231,8 +251,8 @@ class ScenarioEvaluator(Evaluator):
     @exponential_backoff_retry(max_retries=5, base_delay=1.0, max_delay=60.0)
     async def _call_openai_api(self, params: dict) -> List[str]:
         """Make a single API call to OpenAI with retry logic."""
-
-        response = await self.openai_client.chat.completions.create(**params)
+        client = get_openai_client()
+        response = await client.chat.completions.create(**params)
         
         # Extract only text content from the response
         response_texts = [choice.message.content or "" for choice in response.choices]
