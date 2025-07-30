@@ -12,6 +12,16 @@ from safetytooling.apis import InferenceAPI
 
 from pathlib import Path
 
+# Global InferenceAPI instance - shared across all graders
+_inference_api = None
+
+def get_inference_api() -> InferenceAPI:
+    """Get or create the global InferenceAPI instance."""
+    global _inference_api
+    if _inference_api is None:
+        _inference_api = InferenceAPI()
+    return _inference_api
+
 def parse_autograder_prompt(path: Path) -> Tuple[str, Optional[str]]:
     with open(path, "r") as f:
         prompt_str = f.read()
@@ -31,7 +41,7 @@ class ModelBasedResponseGrader(ResponseGrader):
     def __init__(self, config: ModelBasedResponseGraderConfig):
         self.name = config.name
         self.config = config
-        self.api = InferenceAPI()
+        self.api = get_inference_api()  # Use shared global instance
         self.prompt, self.system_prompt = parse_autograder_prompt(self.config.template_file)
         
         # Create semaphore for this grader if max_concurrent is specified
