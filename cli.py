@@ -269,7 +269,7 @@ async def evaluate_model_scenario_pair(
     return result
 
 
-async def run_evaluation(config: EvalConfig, max_concurrent: int = 5, output_path: Optional[Path] = None, output_format: str = "json") -> List[EvalResult]:
+async def run_evaluation(config: EvalConfig, max_concurrent: int = 5, output_path: Optional[Path] = None, output_format: str = "json") -> None:
     """
     Run evaluation given a configuration object.
     
@@ -279,7 +279,7 @@ async def run_evaluation(config: EvalConfig, max_concurrent: int = 5, output_pat
         output_path: Optional path to save progressive results
         
     Returns:
-        List of EvalResult objects
+        None - results are saved progressively to output_path
     """
     # Scenarios is always a list of Path objects now (from glob expansion)
     scenario_paths = config.scenarios
@@ -296,12 +296,15 @@ async def run_evaluation(config: EvalConfig, max_concurrent: int = 5, output_pat
     print(f"Running with max {max_concurrent} concurrent model evaluations")
     print(f"Total evaluations to run: {len(model_scenario_pairs)}")
     
-    # Create progressive results saver if output path provided
-    results_saver = None
-    if output_path:
-        results_saver = create_results_saver(output_path, config, format=output_format)
-        format_name = "JSONL" if output_format == "jsonl" else "JSON"
-        print(f"Saving results progressively to {format_name} file: {output_path}")
+    # Always create progressive results saver
+    if output_path is None:
+        # Create default output path with timestamp
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        output_path = Path(f"eval_results_{timestamp}.{output_format}")
+    
+    results_saver = create_results_saver(output_path, config, format=output_format)
+    format_name = "JSONL" if output_format == "jsonl" else "JSON"
+    print(f"Saving results progressively to {format_name} file: {output_path}")
     
     print()
     
@@ -317,27 +320,30 @@ async def run_evaluation(config: EvalConfig, max_concurrent: int = 5, output_pat
     
     # Create tasks for all (model, scenario) pairs
     tasks = [
-        evaluate_model_scenario_pair(model_config, scenario_path, config, semaphore, progress, pbar, results_saver)
+        asyncio.create_task(
+            evaluate_model_scenario_pair(model_config, scenario_path, config, semaphore, progress, pbar, results_saver)
+        )
         for model_config, scenario_path in model_scenario_pairs
     ]
     
-    # Run all tasks concurrently
+    # Process tasks as they complete
     try:
-        results = await asyncio.gather(*tasks)
+        for completed_task in asyncio.as_completed(tasks):
+            try:
+                await completed_task
+            except Exception as e:
+                # Error already handled in evaluate_model_scenario_pair
+                logger.debug(f"Task failed with exception: {e}")
     finally:
         pbar.close()
     
-    # Filter out None results
-    results = [r for r in results if r is not None]
-    
-    # Finalize results saver if it exists
-    if results_saver:
-        await results_saver.finalize()
-        print(f"\nAll results saved to: {output_path}")
+    # Finalize results saver
+    await results_saver.finalize()
+    print(f"\nAll results saved to: {output_path}")
     
     # Print final summary
     print(f"\n\nEvaluation Complete!")
-    print(f"Total evaluations completed: {len(results)}/{len(model_scenario_pairs)}")
+    print(f"Total evaluations completed: {progress.completed_evaluations}/{len(model_scenario_pairs)}")
     if progress.error_count > 0:
         print(f"Evaluation errors: {progress.error_count}")
     
@@ -352,11 +358,9 @@ async def run_evaluation(config: EvalConfig, max_concurrent: int = 5, output_pat
                     print(f"  {model}: {avg:.2f} (n={len(scores)}, errors={errors})")
                 else:
                     print(f"  {model}: {avg:.2f} (n={len(scores)})")
-    
-    return results
 
 
-async def run_and_save_evaluation(config_path: Path, output_dir: Optional[Path] = None, max_concurrent: int = 5, output_format: str = "json") -> List[EvalResult]:
+async def run_and_save_evaluation(config_path: Path, output_dir: Optional[Path] = None, max_concurrent: int = 5, output_format: str = "json") -> None:
     """
     Run evaluation from a configuration file and save results.
     
@@ -365,7 +369,7 @@ async def run_and_save_evaluation(config_path: Path, output_dir: Optional[Path] 
         output_dir: Optional directory to save results (defaults to config directory)
         
     Returns:
-        List of EvalResult objects
+        None - results are saved to file
     """
     # Load configuration
     print(f"Loading config from {config_path}")
@@ -382,17 +386,10 @@ async def run_and_save_evaluation(config_path: Path, output_dir: Optional[Path] 
     output_file = output_dir / f"eval_results_{config_path.stem}_{timestamp}.{file_extension}"
     
     # Run evaluation with progressive saving
-    results = await run_evaluation(config, max_concurrent, output_path=output_file, output_format=output_format)
+    await run_evaluation(config, max_concurrent, output_path=output_file, output_format=output_format)
     
     print(f"\nEvaluation results saved to: {output_file}")
-    
-    # Also print summary
-    if results:
-        print(f"\nTotal scenarios evaluated: {len(set(r.scenario_path for r in results if hasattr(r, 'scenario_path')))}")
-        print(f"Total model evaluations: {len(results)}")
-    
     print("\nEvaluation complete!")
-    return results
 
 
 def main():

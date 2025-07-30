@@ -223,7 +223,7 @@ class JSONResultsSaver(BaseResultsSaver):
     """Save results in JSON format with metadata."""
     
     def __init__(self, output_path: Path, config: Optional[EvalConfig] = None,
-                 batch_size: int = 10, flush_interval: float = 5.0):
+                 batch_size: int = 1000, flush_interval: float = 10.0):
         super().__init__(output_path, config, batch_size, flush_interval)
         
         # Initialize data structure
