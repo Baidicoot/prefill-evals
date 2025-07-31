@@ -4,7 +4,7 @@ import re
 from difflib import SequenceMatcher
 
 from prefill_evals.evaluator import ResponseGrader, ResponseGrading, render_messages
-from prefill_evals.config import ModelBasedResponseGraderConfig, StringMatchGraderConfig, BinaryChoiceGraderConfig
+from prefill_evals.config import ModelBasedResponseGraderConfig, StringMatchGraderConfig, BinaryChoiceGraderConfig, NumberRangeGraderConfig
 from prefill_evals.models import ScenarioEval, AgentMessage
 from prefill_evals.parser import parse_xml_tags, render_transcript
 
@@ -290,5 +290,118 @@ class BinaryChoiceGrader(ResponseGrader):
             ],
             "match_type": self.config.match_type
         }
+        
+        return ResponseGrading(score=score, data=data)
+
+
+class NumberRangeGrader(ResponseGrader):
+    """
+    Grade a model response by extracting a number and using it as the score.
+    The number should be within the specified range [low, high].
+    """
+    
+    def __init__(self, config: NumberRangeGraderConfig):
+        self.name = config.name
+        self.config = config
+        
+        # Validate out_of_range_behavior
+        if config.out_of_range_behavior not in ["clamp", "none"]:
+            raise ValueError(f"out_of_range_behavior must be 'clamp' or 'none', got '{config.out_of_range_behavior}'")
+        
+        # Compile regex pattern for number extraction
+        # This pattern matches integers, decimals, and scientific notation
+        # It also handles negative numbers and optional commas in large numbers
+        self.number_pattern = re.compile(
+            r'-?\d{1,3}(?:,\d{3})*(?:\.\d+)?(?:[eE][+-]?\d+)?|'  # Comma-separated decimals
+            r'-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?'  # Regular decimals
+        )
+    
+    def _extract_numbers(self, response: str) -> List[float]:
+        """Extract all numbers from the response string."""
+        # Remove commas from potential numbers before parsing
+        cleaned_response = response.replace(',', '')
+        
+        # Find all number matches
+        matches = self.number_pattern.findall(cleaned_response)
+        
+        numbers = []
+        for match in matches:
+            try:
+                numbers.append(float(match))
+            except ValueError:
+                # Skip if can't convert to float
+                continue
+        
+        return numbers
+    
+    async def grade(self, response: str, eval: ScenarioEval) -> Optional[ResponseGrading]:
+        """Grade response by extracting a number and using it as the score."""
+        if self.config.extract_first:
+            # Extract all numbers and use the first one
+            numbers = self._extract_numbers(response)
+            
+            if not numbers:
+                # No numbers found
+                if self.config.default_score is None:
+                    return None  # Skip grading
+                    
+                score = self.config.default_score
+                data = {
+                    "extracted_number": None,
+                    "raw_response": response,
+                    "range": [self.config.low, self.config.high]
+                }
+            else:
+                # Use the first number found
+                number = numbers[0]
+                
+                # Handle out of range behavior
+                if self.config.low <= number <= self.config.high:
+                    score = number
+                elif self.config.out_of_range_behavior == "clamp":
+                    # Clamp to range
+                    score = max(self.config.low, min(self.config.high, number))
+                else:  # "none"
+                    return None  # Skip grading
+                
+                data = {
+                    "extracted_number": number,
+                    "score_used": score,
+                    "was_clamped": score != number,
+                    "all_numbers_found": numbers,
+                    "range": [self.config.low, self.config.high]
+                }
+        else:
+            # Check if the entire response is a number
+            try:
+                # Strip whitespace and try to parse as float
+                number = float(response.strip().replace(',', ''))
+                
+                # Handle out of range behavior
+                if self.config.low <= number <= self.config.high:
+                    score = number
+                elif self.config.out_of_range_behavior == "clamp":
+                    # Clamp to range
+                    score = max(self.config.low, min(self.config.high, number))
+                else:  # "none"
+                    return None  # Skip grading
+                
+                data = {
+                    "extracted_number": number,
+                    "score_used": score,
+                    "was_clamped": score != number,
+                    "range": [self.config.low, self.config.high]
+                }
+            except ValueError:
+                # Response is not a valid number
+                if self.config.default_score is None:
+                    return None  # Skip grading
+                    
+                score = self.config.default_score
+                data = {
+                    "extracted_number": None,
+                    "raw_response": response,
+                    "range": [self.config.low, self.config.high]
+                }
         
         return ResponseGrading(score=score, data=data)

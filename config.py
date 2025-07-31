@@ -58,10 +58,19 @@ class BinaryChoiceGraderConfig:
     score_neither: Optional[float] = None  # Score when neither detected (None = skip grading)
 
 @dataclass
+class NumberRangeGraderConfig:
+    name: str
+    low: float  # Lower bound (inclusive)
+    high: float  # Upper bound (inclusive)
+    out_of_range_behavior: str = "clamp"  # "clamp" or "none"
+    default_score: Optional[float] = None  # Score when no number found (None = skip grading)
+    extract_first: bool = True  # If True, extract first number found; if False, check if entire response is a number
+
+@dataclass
 class EvalConfig:
     models: List[ModelSpec]
     runs_per_model: int
-    autograders: List[Union[ModelBasedResponseGraderConfig, StringMatchGraderConfig, BinaryChoiceGraderConfig]]
+    autograders: List[Union[ModelBasedResponseGraderConfig, StringMatchGraderConfig, BinaryChoiceGraderConfig, NumberRangeGraderConfig]]
     scenarios: List[Path]  # Always a list now, populated via glob expansion
     extra_items: Optional[List[str]] = None
     evaluator: EvaluatorConfig = field(default_factory=EvaluatorConfig)  # Configuration for evaluator type
@@ -153,6 +162,16 @@ def load_config(config_path: Path) -> EvalConfig:
                 score_both=grader_data.get('score_both', None),
                 score_neither=grader_data.get('score_neither', None)
             ))
+        elif grader_type == 'number_range':
+            # Number range grader
+            autograders.append(NumberRangeGraderConfig(
+                name=grader_data['name'],
+                low=grader_data['low'],
+                high=grader_data['high'],
+                out_of_range_behavior=grader_data.get('out_of_range_behavior', 'clamp'),
+                default_score=grader_data.get('default_score', None),
+                extract_first=grader_data.get('extract_first', True)
+            ))
         elif grader_type == 'model':
             # Model-based grader
             grader_config = load_model_spec(grader_data['grader'])
@@ -164,7 +183,7 @@ def load_config(config_path: Path) -> EvalConfig:
                 max_concurrent=grader_data.get('max_concurrent')
             ))
         else:
-            raise ValueError(f"Unknown autograder type: {grader_type}. Supported types: 'model', 'string_match', 'binary_choice'")
+            raise ValueError(f"Unknown autograder type: {grader_type}. Supported types: 'model', 'string_match', 'binary_choice', 'number_range'")
     
     # Parse scenarios - always treat as glob patterns (direct paths work too)
     scenarios_data = config_data.get('scenarios')
