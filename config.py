@@ -97,7 +97,8 @@ def load_model_spec(model_data: Dict[str, Any]) -> ModelSpec:
         provider=model_data['provider'],
         model_id=model_data['model_id'],
         max_response_tokens=model_data.get('max_response_tokens'),
-        alias=model_data.get('alias')
+        alias=model_data.get('alias'),
+        api_key=model_data.get('api_key')  # Environment variable name for API key
     )
 
 def load_config(config_path: Path) -> EvalConfig:
@@ -184,7 +185,7 @@ def load_config(config_path: Path) -> EvalConfig:
             ))
         else:
             raise ValueError(f"Unknown autograder type: {grader_type}. Supported types: 'model', 'string_match', 'binary_choice', 'number_range'")
-    
+
     # Parse scenarios - always treat as glob patterns (direct paths work too)
     scenarios_data = config_data.get('scenarios')
     if isinstance(scenarios_data, str):

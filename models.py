@@ -17,6 +17,7 @@ class ModelSpec:
     model_id: str
     max_response_tokens: Optional[int] = None
     alias: Optional[str] = None
+    api_key: Optional[str] = None  # Environment variable name for API key
     
     def get_short_name(self, max_length: int = 12) -> str:
         """Get a short, readable version of model names.
@@ -300,6 +301,13 @@ class ToolParameter:
     description: str
     type: str
     optional: bool
+    # For array types
+    items: Optional[Dict[str, Any]] = None  # JSON Schema for array items
+    # For object types
+    properties: Optional[Dict[str, Dict[str, Any]]] = None  # JSON Schema for object properties
+    required: Optional[List[str]] = None  # Required properties for objects
+    # For enum types
+    enum: Optional[List[Any]] = None  # Allowed values
 
 @dataclass
 class ToolDefinition:
@@ -328,10 +336,33 @@ class ToolDefinition:
                     "object": "object"
                 }
                 
-                properties[param_name] = {
+                # Build the parameter schema
+                param_schema = {
                     "type": type_mapping.get(param_type, "string"),
                     "description": param.description
                 }
+                
+                # Add array items if specified
+                if param_type == "array" and param.items:
+                    param_schema["items"] = param.items
+                elif param_type == "array" and not param.items:
+                    # Default to string items if not specified
+                    param_schema["items"] = {"type": "string"}
+                
+                # Add object properties if specified
+                if param_type == "object" and param.properties:
+                    param_schema["properties"] = param.properties
+                    if param.required:
+                        param_schema["required"] = param.required
+                elif param_type == "object" and not param.properties:
+                    # Default to empty object if not specified
+                    param_schema["properties"] = {}
+                
+                # Add enum if specified
+                if param.enum:
+                    param_schema["enum"] = param.enum
+                
+                properties[param_name] = param_schema
                 
                 if not param.optional:
                     required.append(param_name)
@@ -369,10 +400,33 @@ class ToolDefinition:
                     "object": "object"
                 }
                 
-                properties[param_name] = {
+                # Build the parameter schema
+                param_schema = {
                     "type": type_mapping.get(param_type, "string"),
                     "description": param.description
                 }
+                
+                # Add array items if specified
+                if param_type == "array" and param.items:
+                    param_schema["items"] = param.items
+                elif param_type == "array" and not param.items:
+                    # Default to string items if not specified
+                    param_schema["items"] = {"type": "string"}
+                
+                # Add object properties if specified
+                if param_type == "object" and param.properties:
+                    param_schema["properties"] = param.properties
+                    if param.required:
+                        param_schema["required"] = param.required
+                elif param_type == "object" and not param.properties:
+                    # Default to empty object if not specified
+                    param_schema["properties"] = {}
+                
+                # Add enum if specified
+                if param.enum:
+                    param_schema["enum"] = param.enum
+                
+                properties[param_name] = param_schema
                 
                 if not param.optional:
                     required.append(param_name)
@@ -398,12 +452,29 @@ class ScenarioEval:
     
     def to_dict(self) -> Dict[str, Any]:
         """Convert ScenarioEval to JSON-serializable dictionary."""
+        # Helper to serialize tool parameters
+        def param_to_dict(p: ToolParameter) -> Dict[str, Any]:
+            param_dict = {
+                'name': p.name,
+                'description': p.description,
+                'type': p.type,
+                'optional': p.optional
+            }
+            # Add optional fields if present
+            if p.items is not None:
+                param_dict['items'] = p.items
+            if p.properties is not None:
+                param_dict['properties'] = p.properties
+            if p.required is not None:
+                param_dict['required'] = p.required
+            if p.enum is not None:
+                param_dict['enum'] = p.enum
+            return param_dict
+        
         result = {
             'messages': [msg.to_dict() for msg in self.messages],
             'tools': [{'name': tool.name, 'description': tool.description, 
-                      'parameters': [{'name': p.name, 'description': p.description, 
-                                    'type': p.type, 'optional': p.optional} 
-                                   for p in (tool.parameters or [])]} 
+                      'parameters': [param_to_dict(p) for p in (tool.parameters or [])]} 
                      for tool in self.tools],
         }
         if self.system is not None:
@@ -421,12 +492,19 @@ class ScenarioEval:
         for tool_data in data.get('tools', []):
             parameters = []
             for param_data in tool_data.get('parameters', []):
-                parameters.append(ToolParameter(
+                # Create ToolParameter with all fields
+                param = ToolParameter(
                     name=param_data['name'],
                     description=param_data['description'],
                     type=param_data['type'],
-                    optional=param_data['optional']
-                ))
+                    optional=param_data['optional'],
+                    # Optional fields
+                    items=param_data.get('items'),
+                    properties=param_data.get('properties'),
+                    required=param_data.get('required'),
+                    enum=param_data.get('enum')
+                )
+                parameters.append(param)
             tools.append(ToolDefinition(
                 name=tool_data['name'],
                 description=tool_data.get('description'),

@@ -24,25 +24,81 @@ from prefill_evals.models import ModelSpec
 logger = logging.getLogger(__name__)
 import random
 
-# Global API client instances - shared across all evaluators
-_anthropic_client = None
-_openai_client = None
+# Global API client instances - cache by API key env var name
+_anthropic_clients = {}
+_openai_clients = {}
 
-def get_anthropic_client() -> AsyncAnthropic:
-    """Get or create the global Anthropic client instance."""
-    global _anthropic_client
-    if _anthropic_client is None:
-        _anthropic_client = AsyncAnthropic()
-    return _anthropic_client
+def get_anthropic_client(api_key_env: Optional[str] = None) -> AsyncAnthropic:
+    """Get or create an Anthropic client instance with optional custom API key.
+    
+    Args:
+        api_key_env: Environment variable name containing the API key.
+                    If None, uses default ANTHROPIC_API_KEY.
+    """
+    import os
+    
+    global _anthropic_clients
+    
+    # Use None as key for default client
+    cache_key = api_key_env or None
+    
+    # Return cached client if available
+    if cache_key in _anthropic_clients:
+        return _anthropic_clients[cache_key]
+    
+    # Create new client
+    if api_key_env:
+        api_key = os.environ.get(api_key_env)
+        if not api_key:
+            raise ValueError(f"Environment variable {api_key_env} not found")
+        client = AsyncAnthropic(api_key=api_key)
+    else:
+        # Use default environment variable
+        api_key = os.environ.get("ANTHROPIC_API_KEY")
+        if not api_key:
+            raise ValueError("ANTHROPIC_API_KEY environment variable not found")
+        client = AsyncAnthropic(api_key=api_key)
+    
+    # Cache and return
+    _anthropic_clients[cache_key] = client
+    return client
 
-def get_openai_client() -> AsyncOpenAI:
-    """Get or create the global OpenAI client instance."""
-    global _openai_client
-    if _openai_client is None:
-        _openai_client = AsyncOpenAI()
-    return _openai_client
+def get_openai_client(api_key_env: Optional[str] = None) -> AsyncOpenAI:
+    """Get or create an OpenAI client instance with optional custom API key.
+    
+    Args:
+        api_key_env: Environment variable name containing the API key.
+                    If None, uses default OPENAI_API_KEY.
+    """
+    import os
+    
+    global _openai_clients
+    
+    # Use None as key for default client
+    cache_key = api_key_env or None
+    
+    # Return cached client if available
+    if cache_key in _openai_clients:
+        return _openai_clients[cache_key]
+    
+    # Create new client
+    if api_key_env:
+        api_key = os.environ.get(api_key_env)
+        if not api_key:
+            raise ValueError(f"Environment variable {api_key_env} not found")
+        client = AsyncOpenAI(api_key=api_key)
+    else:
+        # Use default environment variable
+        api_key = os.environ.get("OPENAI_API_KEY")
+        if not api_key:
+            raise ValueError("OPENAI_API_KEY environment variable not found")
+        client = AsyncOpenAI(api_key=api_key)
+    
+    # Cache and return
+    _openai_clients[cache_key] = client
+    return client
 
-def exponential_backoff_retry(max_retries: int = 5, base_delay: float = 1.0, max_delay: float = 60.0, jitter: bool = True):
+def exponential_backoff_retry(max_retries: int = 10, base_delay: float = 5.0, max_delay: float = 120.0, jitter: bool = True):
     """
     Decorator for retrying async functions with exponential backoff and optional jitter.
     
@@ -205,10 +261,10 @@ class ScenarioEvaluator(Evaluator):
         self.eval = eval
         self.runs_per_model = runs_per_model
 
-    @exponential_backoff_retry(max_retries=5, base_delay=1.0, max_delay=60.0)
-    async def _call_anthropic_api(self, params: dict) -> str:
+    @exponential_backoff_retry(max_retries=5, base_delay=5.0, max_delay=20.0)
+    async def _call_anthropic_api(self, params: dict, api_key_env: Optional[str] = None) -> str:
         """Make a single API call to Anthropic with retry logic."""
-        client = get_anthropic_client()
+        client = get_anthropic_client(api_key_env)
         response = await client.messages.create(**params)
         
         # Extract only text content from the response
@@ -219,7 +275,7 @@ class ScenarioEvaluator(Evaluator):
         
         return response_text.strip()
 
-    async def run_anthropic_model(self, model_id: str, num_runs: int = 1, max_response_tokens: Optional[int] = None) -> List[List[AgentMessage]]:
+    async def run_anthropic_model(self, model_id: str, num_runs: int = 1, max_response_tokens: Optional[int] = None, api_key_env: Optional[str] = None) -> List[List[AgentMessage]]:
         """Run Anthropic model on the scenario eval."""
         responses = []
         
@@ -238,7 +294,7 @@ class ScenarioEvaluator(Evaluator):
             params = {
                 "model": model_id,
                 "messages": messages,
-                "max_completion_tokens": 4096 if max_response_tokens is None else max_response_tokens,
+                "max_tokens": 4096 if max_response_tokens is None else max_response_tokens,
             }
             
             # Add system prompt if present
@@ -251,7 +307,7 @@ class ScenarioEvaluator(Evaluator):
             
             try:
                 # Make the API call with retry logic
-                response_text = await self._call_anthropic_api(params)
+                response_text = await self._call_anthropic_api(params, api_key_env)
                 # Wrap the string response in a TextMessage
                 response_messages = [TextMessage(role="assistant", content=response_text)]
                 responses.append(response_messages)
@@ -261,10 +317,10 @@ class ScenarioEvaluator(Evaluator):
         
         return responses
     
-    @exponential_backoff_retry(max_retries=5, base_delay=1.0, max_delay=60.0)
-    async def _call_openai_api(self, params: dict) -> List[str]:
+    @exponential_backoff_retry(max_retries=5, base_delay=5.0, max_delay=20.0)
+    async def _call_openai_api(self, params: dict, api_key_env: Optional[str] = None) -> List[str]:
         """Make a single API call to OpenAI with retry logic."""
-        client = get_openai_client()
+        client = get_openai_client(api_key_env)
         response = await client.chat.completions.create(**params)
         
         # Extract only text content from the response
@@ -272,7 +328,7 @@ class ScenarioEvaluator(Evaluator):
         
         return response_texts
 
-    async def run_openai_model(self, model_id: str, num_runs: int = 1, max_response_tokens: Optional[int] = None) -> List[List[AgentMessage]]:
+    async def run_openai_model(self, model_id: str, num_runs: int = 1, max_response_tokens: Optional[int] = None, api_key_env: Optional[str] = None) -> List[List[AgentMessage]]:
         """Run OpenAI model on the scenario eval."""
         # Convert messages to OpenAI format
         messages = to_openai_format(self.eval.messages)
@@ -289,7 +345,7 @@ class ScenarioEvaluator(Evaluator):
         params = {
             "model": model_id,
             "messages": messages,
-            "max_tokens": 4096 if max_response_tokens is None else max_response_tokens,
+            "max_completion_tokens": 4096 if max_response_tokens is None else max_response_tokens,
             "n": num_runs,
         }
             
@@ -301,7 +357,7 @@ class ScenarioEvaluator(Evaluator):
 
         try:
             # Make the API call with retry logic
-            response_texts = await self._call_openai_api(params)
+            response_texts = await self._call_openai_api(params, api_key_env)
             # Convert each response to a list of messages
             responses = []
             for response_text in response_texts:
@@ -313,11 +369,11 @@ class ScenarioEvaluator(Evaluator):
         
         return responses
     
-    async def run_model(self, provider: str, model_id: str, num_runs: int = 1, max_response_tokens: Optional[int] = None) -> List[List[AgentMessage]]:
+    async def run_model(self, provider: str, model_id: str, num_runs: int = 1, max_response_tokens: Optional[int] = None, api_key_env: Optional[str] = None) -> List[List[AgentMessage]]:
         if provider == "anthropic":
-            return await self.run_anthropic_model(model_id, num_runs, max_response_tokens)
+            return await self.run_anthropic_model(model_id, num_runs, max_response_tokens, api_key_env)
         elif provider == "openai":
-            return await self.run_openai_model(model_id, num_runs, max_response_tokens)
+            return await self.run_openai_model(model_id, num_runs, max_response_tokens, api_key_env)
         else:
             raise ValueError(f"Unsupported model provider: {provider}")
     
@@ -347,7 +403,8 @@ class ScenarioEvaluator(Evaluator):
             provider=model.provider,
             model_id=model.model_id,
             num_runs=num_runs,
-            max_response_tokens=model.max_response_tokens
+            max_response_tokens=model.max_response_tokens,
+            api_key_env=model.api_key
         )
         
         if self.graders:

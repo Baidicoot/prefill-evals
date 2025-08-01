@@ -277,6 +277,17 @@ def parse_tool_definitions(tools_content: str) -> List[ToolDefinition]:
     <tool name="function_name">
         <description>Tool description</description>
         <parameter name="param_name" type="string" optional="true">Parameter description</parameter>
+        <parameter name="array_param" type="array" optional="true">
+            <items type="string"/>
+            Array parameter description
+        </parameter>
+        <parameter name="object_param" type="object">
+            <properties>
+                <property name="field1" type="string" required="true"/>
+                <property name="field2" type="number"/>
+            </properties>
+            Object parameter description
+        </parameter>
     </tool>
     """
     tools = []
@@ -356,18 +367,203 @@ def parse_tool_definitions(tools_content: str) -> List[ToolDefinition]:
             # Check if optional
             param_optional = f'{TOOL_PARAM_OPTIONAL_ATTR}="true"' in param_tag_content
             
-            # Extract parameter description
+            # Extract parameter content and description
             param_desc_end = tool_content.find(f"</{TOOL_PARAMETER_TAG}>", param_tag_end)
-            param_description = ""
+            param_content = ""
             if param_desc_end != -1:
-                param_description = tool_content[param_tag_end + 1:param_desc_end].strip()
+                param_content = tool_content[param_tag_end + 1:param_desc_end].strip()
+            
+            # Parse nested schema for arrays and objects
+            items_schema = None
+            properties_schema = None
+            required_fields = None
+            enum_values = None
+            
+            if param_type == "array":
+                # Look for <items> tag
+                items_start = param_content.find("<items")
+                if items_start != -1:
+                    # Check if it's a self-closing tag or has nested content
+                    items_self_close = param_content.find("/>", items_start)
+                    items_open_end = param_content.find(">", items_start)
+                    
+                    if items_self_close != -1 and (items_open_end == -1 or items_self_close < items_open_end):
+                        # Self-closing tag (simple type)
+                        items_tag = param_content[items_start:items_self_close + 2]
+                        items_type_start = items_tag.find('type="')
+                        if items_type_start != -1:
+                            items_type_start += len('type="')
+                            items_type_end = items_tag.find('"', items_type_start)
+                            items_type = items_tag[items_type_start:items_type_end]
+                            items_schema = {"type": items_type}
+                        
+                        # Remove items tag from description
+                        param_content = param_content[:items_start] + param_content[items_self_close + 2:]
+                    
+                    elif items_open_end != -1:
+                        # Opening tag with nested content (object type)
+                        items_close = param_content.find("</items>", items_open_end)
+                        if items_close != -1:
+                            # Extract items tag attributes
+                            items_tag = param_content[items_start:items_open_end + 1]
+                            items_type_start = items_tag.find('type="')
+                            if items_type_start != -1:
+                                items_type_start += len('type="')
+                                items_type_end = items_tag.find('"', items_type_start)
+                                items_type = items_tag[items_type_start:items_type_end]
+                                
+                                if items_type == "object":
+                                    # Parse nested properties
+                                    items_content = param_content[items_open_end + 1:items_close]
+                                    items_schema = {"type": "object", "properties": {}, "required": []}
+                                    
+                                    # Parse properties within items
+                                    prop_pos = 0
+                                    while prop_pos < len(items_content):
+                                        prop_start = items_content.find("<property", prop_pos)
+                                        if prop_start == -1:
+                                            break
+                                        
+                                        # Find end of opening tag
+                                        prop_tag_end = items_content.find(">", prop_start)
+                                        if prop_tag_end == -1:
+                                            break
+                                        
+                                        # Extract opening tag
+                                        prop_tag = items_content[prop_start:prop_tag_end + 1]
+                                        
+                                        # Find closing tag
+                                        prop_close = items_content.find("</property>", prop_tag_end)
+                                        if prop_close == -1:
+                                            break
+                                        
+                                        # Extract property content (description)
+                                        prop_content = items_content[prop_tag_end + 1:prop_close].strip()
+                                        
+                                        # Extract property name
+                                        prop_name_start = prop_tag.find('name="')
+                                        if prop_name_start != -1:
+                                            prop_name_start += len('name="')
+                                            prop_name_end = prop_tag.find('"', prop_name_start)
+                                            prop_name = prop_tag[prop_name_start:prop_name_end]
+                                            
+                                            # Extract property type
+                                            prop_type = "string"  # default
+                                            prop_type_start = prop_tag.find('type="')
+                                            if prop_type_start != -1:
+                                                prop_type_start += len('type="')
+                                                prop_type_end = prop_tag.find('"', prop_type_start)
+                                                prop_type = prop_tag[prop_type_start:prop_type_end]
+                                            
+                                            # Check if optional (if not optional, it's required)
+                                            if 'optional="true"' not in prop_tag:
+                                                items_schema["required"].append(prop_name)
+                                            
+                                            # Add to properties
+                                            items_schema["properties"][prop_name] = {
+                                                "type": prop_type
+                                            }
+                                            # Use content as description if present
+                                            if prop_content:
+                                                items_schema["properties"][prop_name]["description"] = prop_content
+                                        
+                                        prop_pos = prop_close + len("</property>")
+                                    
+                                    # Clean up empty required array
+                                    if not items_schema["required"]:
+                                        del items_schema["required"]
+                                else:
+                                    items_schema = {"type": items_type}
+                            
+                            # Remove items section from description
+                            param_content = param_content[:items_start] + param_content[items_close + len("</items>"):]
+            
+            elif param_type == "object":
+                # Look for <properties> tag
+                props_start = param_content.find("<properties>")
+                if props_start != -1:
+                    props_end = param_content.find("</properties>", props_start)
+                    if props_end != -1:
+                        props_content = param_content[props_start + len("<properties>"):props_end]
+                        properties_schema = {}
+                        required_fields = []
+                        
+                        # Parse individual properties
+                        prop_pos = 0
+                        while prop_pos < len(props_content):
+                            prop_start = props_content.find("<property", prop_pos)
+                            if prop_start == -1:
+                                break
+                            
+                            # Find end of opening tag
+                            prop_tag_end = props_content.find(">", prop_start)
+                            if prop_tag_end == -1:
+                                break
+                            
+                            # Extract opening tag
+                            prop_tag = props_content[prop_start:prop_tag_end + 1]
+                            
+                            # Find closing tag
+                            prop_close = props_content.find("</property>", prop_tag_end)
+                            if prop_close == -1:
+                                break
+                            
+                            # Extract property content (description)
+                            prop_content = props_content[prop_tag_end + 1:prop_close].strip()
+                            
+                            # Extract property name
+                            prop_name_start = prop_tag.find('name="')
+                            if prop_name_start != -1:
+                                prop_name_start += len('name="')
+                                prop_name_end = prop_tag.find('"', prop_name_start)
+                                prop_name = prop_tag[prop_name_start:prop_name_end]
+                                
+                                # Extract property type
+                                prop_type = "string"  # default
+                                prop_type_start = prop_tag.find('type="')
+                                if prop_type_start != -1:
+                                    prop_type_start += len('type="')
+                                    prop_type_end = prop_tag.find('"', prop_type_start)
+                                    prop_type = prop_tag[prop_type_start:prop_type_end]
+                                
+                                # Check if required
+                                if 'required="true"' in prop_tag:
+                                    required_fields.append(prop_name)
+                                
+                                properties_schema[prop_name] = {"type": prop_type}
+                                # Use content as description if present
+                                if prop_content:
+                                    properties_schema[prop_name]["description"] = prop_content
+                            
+                            prop_pos = prop_close + len("</property>")
+                        
+                        # Remove properties section from description
+                        param_content = param_content[:props_start] + param_content[props_end + len("</properties>"):]
+            
+            # Check for enum values
+            enum_start = param_content.find("<enum>")
+            if enum_start != -1:
+                enum_end = param_content.find("</enum>", enum_start)
+                if enum_end != -1:
+                    enum_content = param_content[enum_start + len("<enum>"):enum_end]
+                    # Simple parsing - split by commas
+                    enum_values = [v.strip() for v in enum_content.split(",") if v.strip()]
+                    # Remove enum section from description
+                    param_content = param_content[:enum_start] + param_content[enum_end + len("</enum>"):]
+            
+            # Clean up remaining content as description
+            param_description = param_content.strip()
             
             if param_name:
                 parameters.append(ToolParameter(
                     name=param_name,
                     type=param_type,
                     optional=param_optional,
-                    description=param_description
+                    description=param_description,
+                    items=items_schema,
+                    properties=properties_schema,
+                    required=required_fields,
+                    enum=enum_values
                 ))
             
             param_pos = param_desc_end + len(f"</{TOOL_PARAMETER_TAG}>") if param_desc_end != -1 else param_tag_end + 1

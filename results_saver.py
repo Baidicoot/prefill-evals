@@ -67,8 +67,7 @@ def serialize_eval_result(result: EvalResult) -> Dict[str, Any]:
     for response_messages in result.responses:
         serialized_messages = [serialize_agent_message(msg) for msg in response_messages]
         serialized_responses.append({
-            "messages": serialized_messages,
-            "rendered": "\n".join(msg.render() for msg in response_messages)
+            "messages": serialized_messages
         })
     
     return {
